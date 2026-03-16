@@ -6,6 +6,7 @@
  */
 package com.excp.podroid.ui.screens.settings
 
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -13,26 +14,42 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.excp.podroid.data.repository.PortForwardRule
+import com.excp.podroid.engine.VmState
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -41,6 +58,9 @@ fun SettingsScreen(
     viewModel: SettingsViewModel = hiltViewModel(),
 ) {
     val darkTheme by viewModel.darkTheme.collectAsStateWithLifecycle(false)
+    val portForwardRules by viewModel.portForwardRules.collectAsStateWithLifecycle()
+    val vmState by viewModel.vmState.collectAsStateWithLifecycle()
+    var showAddDialog by remember { mutableStateOf(false) }
 
     Scaffold(
         topBar = {
@@ -74,6 +94,55 @@ fun SettingsScreen(
 
             Spacer(Modifier.height(16.dp))
 
+            // Port Forwarding Section
+            SettingsSectionHeader("Port Forwarding")
+
+            Text(
+                text = "Forward ports from the VM to your Android device. " +
+                    "Changes apply immediately if the VM is running.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(bottom = 8.dp),
+            )
+
+            if (portForwardRules.isEmpty()) {
+                Text(
+                    text = "No port forwards configured",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(vertical = 8.dp),
+                )
+            } else {
+                portForwardRules.forEach { rule ->
+                    PortForwardRuleRow(
+                        rule = rule,
+                        onDelete = { viewModel.removePortForward(rule) },
+                    )
+                }
+            }
+
+            Spacer(Modifier.height(8.dp))
+
+            FilledTonalButton(
+                onClick = { showAddDialog = true },
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Icon(Icons.Default.Add, contentDescription = null)
+                Spacer(Modifier.width(8.dp))
+                Text("Add Port Forward")
+            }
+
+            if (vmState is VmState.Running) {
+                Text(
+                    text = "VM is running - changes apply immediately via QMP",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.padding(top = 4.dp),
+                )
+            }
+
+            Spacer(Modifier.height(16.dp))
+
             SettingsSectionHeader("About")
 
             SettingsInfoRow("Version", "1.0.0")
@@ -81,11 +150,122 @@ fun SettingsScreen(
             SettingsInfoRow("Guest", "AArch64 (ARM64)")
             SettingsInfoRow("Distro", "Alpine Linux")
             SettingsInfoRow("Container", "Podman")
-            SettingsInfoRow("Terminal", "ttyd")
+            SettingsInfoRow("Storage", "Persistent (overlay)")
 
             Spacer(Modifier.height(32.dp))
         }
     }
+
+    if (showAddDialog) {
+        AddPortForwardDialog(
+            onDismiss = { showAddDialog = false },
+            onAdd = { hostPort, guestPort, protocol ->
+                viewModel.addPortForward(hostPort, guestPort, protocol)
+                showAddDialog = false
+            },
+        )
+    }
+}
+
+@Composable
+private fun PortForwardRuleRow(
+    rule: PortForwardRule,
+    onDelete: () -> Unit,
+) {
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 4.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant,
+        ),
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = "Host :${rule.hostPort}  ->  VM :${rule.guestPort}",
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+                Text(
+                    text = rule.protocol.uppercase(),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            IconButton(onClick = onDelete) {
+                Icon(
+                    Icons.Default.Delete,
+                    contentDescription = "Remove",
+                    tint = MaterialTheme.colorScheme.error,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun AddPortForwardDialog(
+    onDismiss: () -> Unit,
+    onAdd: (hostPort: Int, guestPort: Int, protocol: String) -> Unit,
+) {
+    var hostPort by remember { mutableStateOf("") }
+    var guestPort by remember { mutableStateOf("") }
+    var error by remember { mutableStateOf<String?>(null) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Add Port Forward") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                OutlinedTextField(
+                    value = hostPort,
+                    onValueChange = { hostPort = it; error = null },
+                    label = { Text("Host port (Android)") },
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                OutlinedTextField(
+                    value = guestPort,
+                    onValueChange = { guestPort = it; error = null },
+                    label = { Text("VM port") },
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                if (error != null) {
+                    Text(
+                        text = error!!,
+                        color = MaterialTheme.colorScheme.error,
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = {
+                val hp = hostPort.toIntOrNull()
+                val gp = guestPort.toIntOrNull()
+                if (hp == null || gp == null || hp !in 1..65535 || gp !in 1..65535) {
+                    error = "Enter valid ports (1-65535)"
+                    return@TextButton
+                }
+                onAdd(hp, gp, "tcp")
+            }) {
+                Text("Add")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Cancel")
+            }
+        },
+    )
 }
 
 @Composable

@@ -18,6 +18,7 @@ import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.excp.podroid.MainActivity
 import com.excp.podroid.R
+import com.excp.podroid.data.repository.PortForwardRepository
 import com.excp.podroid.engine.PodroidQemu
 import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.*
@@ -27,6 +28,7 @@ import javax.inject.Inject
 class PodroidService : Service() {
 
     @Inject lateinit var podroidQemu: PodroidQemu
+    @Inject lateinit var portForwardRepository: PortForwardRepository
 
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private var launchJob: Job? = null
@@ -63,7 +65,8 @@ class PodroidService : Service() {
 
             withContext(Dispatchers.IO) {
                 try {
-                    podroidQemu.start()
+                    val rules = portForwardRepository.getRulesSnapshot()
+                    podroidQemu.start(rules)
                 } catch (e: Exception) {
                     Log.e(TAG, "QEMU failed to start", e)
                 }

@@ -3,12 +3,14 @@
  * Copyright (C) 2024 Podroid contributors
  *
  * QEMU configuration for Podroid (Podman on Android).
- * Uses initrd approach for fast, stateless Alpine Linux VM.
+ * Uses initrd approach with persistent overlay for Alpine Linux VM.
  */
 package com.excp.podroid.engine
 
 import android.content.Context
 import android.util.Log
+import com.excp.podroid.data.repository.PortForwardRepository
+import com.excp.podroid.data.repository.PortForwardRule
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -22,21 +24,38 @@ import javax.inject.Singleton
 @Singleton
 class PodroidQemu @Inject constructor(
     @ApplicationContext private val context: Context,
+    private val portForwardRepository: PortForwardRepository,
 ) {
     private val _state = MutableStateFlow<VmState>(VmState.Idle)
     val state: StateFlow<VmState> = _state.asStateFlow()
 
-    /** Accumulated serial console output */
+    /** Accumulated serial console output (for fallback / logging) */
     private val _consoleText = MutableStateFlow("")
     val consoleText: StateFlow<String> = _consoleText.asStateFlow()
 
-    private var process: Process? = null
+    var process: Process? = null
+        private set
 
     /** Stream to write to VM serial console (QEMU stdin) */
     var consoleOutput: OutputStream? = null
         private set
 
+    /**
+     * Callback for raw console output bytes. When set, each chunk read from
+     * QEMU stdout is forwarded here (used by QemuTerminalSession).
+     */
+    var onConsoleOutput: ((ByteArray, Int) -> Unit)? = null
+
+    /** QMP client for runtime VM management */
+    val qmpClient: QmpClient by lazy {
+        QmpClient("${context.filesDir.absolutePath}/qmp.sock")
+    }
+
     fun start() {
+        start(emptyList())
+    }
+
+    fun start(portForwards: List<PortForwardRule>) {
         if (_state.value is VmState.Starting || _state.value is VmState.Running) {
             Log.w(TAG, "start() called while VM is in state ${_state.value}, ignoring")
             return
@@ -51,7 +70,7 @@ class PodroidQemu @Inject constructor(
         _consoleText.value = ""
 
         try {
-            val cmd = buildCommand(qemuExe)
+            val cmd = buildCommand(qemuExe, portForwards)
             Log.d(TAG, "Launching: ${cmd.joinToString(" ")}")
 
             val nativeDir = context.applicationInfo.nativeLibraryDir
@@ -66,7 +85,7 @@ class PodroidQemu @Inject constructor(
             consoleOutput = process!!.outputStream
             Log.d(TAG, "Process started")
 
-            // Read serial console output (stdout), accumulate in StateFlow, and write to log file
+            // Read serial console output (stdout), log to file, and forward to listeners
             val logFile = File(context.filesDir, "console.log")
             logFile.delete()
             Thread({
@@ -77,10 +96,12 @@ class PodroidQemu @Inject constructor(
                     while (true) {
                         val n = input.read(buf)
                         if (n < 0) break
-                        val text = String(buf, 0, n)
-                        _consoleText.value += text
-                        logOut.write(buf, 0, n)
+                        val chunk = buf.copyOf(n)
+                        _consoleText.value += String(chunk)
+                        logOut.write(chunk, 0, n)
                         logOut.flush()
+                        // Forward to terminal session if attached
+                        onConsoleOutput?.invoke(chunk, n)
                     }
                     logOut.close()
                 } catch (e: Exception) {
@@ -136,17 +157,29 @@ class PodroidQemu @Inject constructor(
     }
 
     fun stop() {
+        // Send sync via serial console for graceful shutdown
+        try {
+            consoleOutput?.let { out ->
+                out.write("sync\n".toByteArray())
+                out.flush()
+                Thread.sleep(500)
+            }
+        } catch (e: Exception) {
+            Log.d(TAG, "Failed to send sync: ${e.message}")
+        }
+
         process?.destroy()
-        try { Thread.sleep(500) } catch (_: Exception) {}
+        try { Thread.sleep(1000) } catch (_: Exception) {}
         if (process?.isAlive == true) {
             process?.destroyForcibly()
         }
         process = null
         consoleOutput = null
+        onConsoleOutput = null
         _state.value = VmState.Stopped
     }
 
-    private fun buildCommand(qemuExe: File): List<String> {
+    private fun buildCommand(qemuExe: File, portForwards: List<PortForwardRule>): List<String> {
         val args = mutableListOf<String>()
 
         // Machine & CPU
@@ -174,15 +207,21 @@ class PodroidQemu @Inject constructor(
             Log.w(TAG, "Initrd not found!")
         }
 
-        // Storage (Persistent Containers)
+        // Storage (Persistent)
         val storagePath = File(context.filesDir, "storage.img")
         if (storagePath.exists()) {
             args += "-device"; args += "virtio-blk-pci,drive=drive1"
             args += "-drive"; args += "file=${storagePath.absolutePath},if=none,id=drive1,format=raw"
         }
 
-        // Network — match Termux QEMU networking pattern (simple user netdev)
-        args += "-netdev"; args += "user,id=net0"
+        // Network with port forwarding
+        val netdevArg = buildString {
+            append("user,id=net0")
+            for (rule in portForwards) {
+                append(",hostfwd=${rule.protocol}::${rule.hostPort}-:${rule.guestPort}")
+            }
+        }
+        args += "-netdev"; args += netdevArg
         args += "-device"; args += "virtio-net,netdev=net0"
 
         // Serial console via stdio — bidirectional through process stdin/stdout
@@ -191,7 +230,7 @@ class PodroidQemu @Inject constructor(
         // Display (headless)
         args += "-display"; args += "none"
 
-        // QMP socket for management
+        // QMP socket for management (port forwarding, VM control)
         args += "-qmp"
         args += "unix:${context.filesDir.absolutePath}/qmp.sock,server,nowait"
 

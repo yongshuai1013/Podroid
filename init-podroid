@@ -1,6 +1,10 @@
 #!/bin/sh
-# Podroid init — optimized for Android QEMU VM + Podman
+# Podroid init — persistent Alpine Linux VM with Podman
+# Uses overlayfs on persistent storage so ALL changes survive reboots.
 # Serial console (ttyAMA0) is the primary interface.
+
+# ── Phase 2: Main init (running inside persistent overlay) ──
+if [ "$1" = "--main" ]; then
 
 # ── Core filesystems ──
 mount -t proc proc /proc -o noexec,nosuid,nodev
@@ -16,7 +20,6 @@ mount -t tmpfs tmpfs /run -o noexec,nosuid,nodev,mode=0755
 # ── cgroup2 (required by podman/crun) ──
 mkdir -p /sys/fs/cgroup
 mount -t cgroup2 cgroup2 /sys/fs/cgroup 2>/dev/null
-# Enable all available controllers for root
 if [ -f /sys/fs/cgroup/cgroup.subtree_control ]; then
     for ctrl in cpuset cpu io memory hugetlb pids rdma misc; do
         echo "+$ctrl" > /sys/fs/cgroup/cgroup.subtree_control 2>/dev/null
@@ -38,10 +41,8 @@ hostname podroid
 KVER=$(uname -r)
 if [ -d "/lib/modules/$KVER" ]; then
     depmod -a 2>/dev/null
-    # Virtio devices
     modprobe virtio_net  2>/dev/null
     modprobe virtio_blk  2>/dev/null
-    # Container essentials
     modprobe fuse        2>/dev/null
     modprobe tun         2>/dev/null
     modprobe veth        2>/dev/null
@@ -88,53 +89,34 @@ sysctl -qw net.bridge.bridge-nf-call-iptables=1 2>/dev/null
 sysctl -qw net.bridge.bridge-nf-call-ip6tables=1 2>/dev/null
 sysctl -qw net.ipv4.ping_group_range="0 2147483647" 2>/dev/null
 sysctl -qw kernel.unprivileged_userns_clone=1 2>/dev/null
-# Increase inotify for podman
 sysctl -qw fs.inotify.max_user_instances=256 2>/dev/null
 sysctl -qw fs.inotify.max_user_watches=65536 2>/dev/null
 
-# ── Persistent storage ──
-for dev in /dev/vda /dev/vdb; do
-    [ -b "$dev" ] || continue
-    mount -t ext4 -o rw,noatime "$dev" /var/lib/containers 2>/dev/null || {
-        echo "[init] Formatting $dev..."
-        mkfs.ext4 -q -F "$dev" 2>/dev/null
-        mount -t ext4 -o rw,noatime "$dev" /var/lib/containers 2>/dev/null
-    }
-    # Ensure storage subdirs exist on persistent disk
-    mkdir -p /var/lib/containers/storage
-    break
-done
+# ── User/group config (only if not already customized) ──
+[ -f /etc/subuid ] || echo "root:100000:65536" > /etc/subuid
+[ -f /etc/subgid ] || echo "root:100000:65536" > /etc/subgid
 
-# ── User/group config ──
-echo "root:100000:65536" > /etc/subuid
-echo "root:100000:65536" > /etc/subgid
+# ── Podman configuration (only write defaults on first boot) ──
+if [ ! -f /etc/containers/containers.conf ]; then
+    mkdir -p /etc/containers
 
-# ── Podman configuration (optimized for QEMU on Android) ──
-mkdir -p /etc/containers
-
-cat > /etc/containers/containers.conf <<'CONF'
+    cat > /etc/containers/containers.conf <<'CONF'
 [containers]
-# Use cgroup2 + crun
 cgroups = "enabled"
 default_sysctls = []
-# Dont need userns inside VM (we are already root)
 userns = "host"
 
 [engine]
-# crun is lighter than runc
 runtime = "crun"
-# No pivot_root in initramfs
 no_pivot_root = true
-# Use slirp4netns for rootless networking
 network_cmd = "/usr/bin/slirp4netns"
-# Events logger
 events_logger = "file"
 
 [network]
 network_backend = "netavark"
 CONF
 
-cat > /etc/containers/storage.conf <<'CONF'
+    cat > /etc/containers/storage.conf <<'CONF'
 [storage]
 driver = "overlay"
 runroot = "/run/containers/storage"
@@ -144,16 +126,19 @@ graphroot = "/var/lib/containers/storage"
 mount_program = "/usr/bin/fuse-overlayfs"
 CONF
 
-cat > /etc/containers/registries.conf <<'CONF'
+    cat > /etc/containers/registries.conf <<'CONF'
 unqualified-search-registries = ["docker.io", "quay.io"]
 CONF
+fi
 
-# ── crun config — disable pivot_root ──
-mkdir -p /etc/crun
-cat > /etc/crun/crun.conf <<'CONF'
+# ── crun config ──
+if [ ! -f /etc/crun/crun.conf ]; then
+    mkdir -p /etc/crun
+    cat > /etc/crun/crun.conf <<'CONF'
 [global]
 no-pivot = true
 CONF
+fi
 
 # ── Environment ──
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
@@ -164,17 +149,32 @@ export CONTAINERS_CONF=/etc/containers/containers.conf
 export CONTAINERS_STORAGE_CONF=/etc/containers/storage.conf
 export CONTAINERS_REGISTRIES_CONF=/etc/containers/registries.conf
 
-# ── Silence kernel messages on console ──
+# ── Console settings ──
 dmesg -n 1 2>/dev/null
+
+# ── Graceful shutdown handler ──
+shutdown_handler() {
+    echo ""
+    echo "[init] Shutting down..."
+    sync
+    # Stop all running containers gracefully
+    podman stop -a -t 5 2>/dev/null
+    sync
+    echo "[init] Goodbye."
+}
+trap shutdown_handler TERM INT HUP
 
 # ── Banner ──
 IP=$(ip addr show "$NETIF" 2>/dev/null | grep 'inet ' | awk '{print $2}' | cut -d'/' -f1)
+PERSISTENT="yes"
+[ -f /mnt/persist/.overlay-active ] || PERSISTENT="no (running from initramfs)"
 echo ""
 echo "=========================================="
 echo "  Podroid - Alpine Linux + Podman"
 echo "=========================================="
-echo "  IP:  ${IP:-no network}"
-echo "  DNS: 8.8.8.8"
+echo "  IP:         ${IP:-no network}"
+echo "  DNS:        8.8.8.8"
+echo "  Persistent: ${PERSISTENT}"
 echo ""
 
 # Quick connectivity check (background, don't block boot)
@@ -190,9 +190,99 @@ echo "  Ready! Try: podman run --rm alpine echo hello"
 echo ""
 
 # ── Shell ──
+
+# Create a profile for the login shell
+cat > /etc/profile <<'PROF'
+export HOME=/root
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+export TERM=linux
+export PODMAN_IGNORE_CGROUPSV1_WARNING=1
+export CONTAINERS_CONF=/etc/containers/containers.conf
+export CONTAINERS_STORAGE_CONF=/etc/containers/storage.conf
+export CONTAINERS_REGISTRIES_CONF=/etc/containers/registries.conf
 cd /root
+PROF
+
+# Set root shell and create passwd entry if missing
+grep -q '^root:' /etc/passwd 2>/dev/null || echo "root:x:0:0:root:/root:/bin/sh" > /etc/passwd
+
+# Use getty to spawn a proper login shell on the serial console.
+# getty sets up the controlling TTY correctly, enabling job control + Ctrl+C.
 while true; do
-    printf "podroid:~# "
-    read -r cmd || continue
-    [ -n "$cmd" ] && eval "$cmd" 2>&1
+    /sbin/getty -n -l /bin/sh 0 ttyAMA0 linux
+    sleep 1
 done
+fi
+
+# ══════════════════════════════════════════════════════════════
+# Phase 1: Early init — mount persistent storage and overlay
+# ══════════════════════════════════════════════════════════════
+
+# Minimal filesystems needed to find and mount the disk
+mount -t proc proc /proc -o noexec,nosuid,nodev
+mount -t sysfs sys /sys -o noexec,nosuid,nodev
+mount -t devtmpfs devtmpfs /dev -o exec,nosuid,mode=0755,size=2M 2>/dev/null || \
+    mount -t tmpfs tmpfs /dev -o exec,nosuid,mode=0755,size=2M
+
+# Load virtio_blk early so the persistent disk is visible
+KVER=$(uname -r)
+if [ -d "/lib/modules/$KVER" ]; then
+    depmod -a 2>/dev/null
+    modprobe virtio_blk 2>/dev/null
+fi
+
+# Silence kernel during setup
+echo 1 > /proc/sys/kernel/printk 2>/dev/null
+
+# ── Find and mount persistent storage ──
+mkdir -p /mnt/persist
+PERSIST_DEV=""
+for dev in /dev/vda /dev/vdb; do
+    [ -b "$dev" ] || continue
+    PERSIST_DEV="$dev"
+    break
+done
+
+OVERLAY_OK=false
+if [ -n "$PERSIST_DEV" ]; then
+    mount -t ext4 -o rw,noatime "$PERSIST_DEV" /mnt/persist 2>/dev/null || {
+        echo "[init] Formatting $PERSIST_DEV for persistent storage..."
+        /bin/busybox --install -s 2>/dev/null
+        mkfs.ext4 -q -F "$PERSIST_DEV" 2>/dev/null
+        mount -t ext4 -o rw,noatime "$PERSIST_DEV" /mnt/persist 2>/dev/null
+    }
+
+    if mountpoint -q /mnt/persist 2>/dev/null; then
+        # Create overlay directories on persistent disk
+        mkdir -p /mnt/persist/upper /mnt/persist/work /mnt/overlay
+
+        # Mount overlay: lower=initramfs, upper=persistent disk
+        mount -t overlay overlay \
+            -o lowerdir=/,upperdir=/mnt/persist/upper,workdir=/mnt/persist/work \
+            /mnt/overlay 2>/dev/null
+
+        if mountpoint -q /mnt/overlay 2>/dev/null; then
+            # Bind the persistent disk into the overlay for direct access
+            mkdir -p /mnt/overlay/mnt/persist
+            mount --bind /mnt/persist /mnt/overlay/mnt/persist
+
+            # Mark overlay as active
+            touch /mnt/persist/.overlay-active
+
+            # Unmount early mounts (will be re-created in phase 2)
+            umount /dev 2>/dev/null
+            umount /sys 2>/dev/null
+            umount /proc 2>/dev/null
+
+            # Enter overlay and run main init
+            exec chroot /mnt/overlay /init --main
+        fi
+    fi
+fi
+
+# ── Fallback: no persistent storage, run directly ──
+echo "[init] WARNING: No persistent storage — changes will be lost on reboot!"
+umount /dev 2>/dev/null
+umount /sys 2>/dev/null
+umount /proc 2>/dev/null
+exec /init --main

@@ -28,6 +28,9 @@ coroutines = "1.9.0"
 # DataStore
 datastore = "1.1.4"
 
+# Termux terminal
+termux = "v0.118.1"
+
 # Testing
 junit = "4.13.2"
 junitVersion = "1.2.1"
@@ -72,6 +75,10 @@ kotlinx-coroutines-android = { group = "org.jetbrains.kotlinx", name = "kotlinx-
 
 # DataStore
 androidx-datastore-preferences = { group = "androidx.datastore", name = "datastore-preferences", version.ref = "datastore" }
+
+# Termux terminal
+termux-terminal-emulator = { group = "com.github.termux.termux-app", name = "terminal-emulator", version.ref = "termux" }
+termux-terminal-view = { group = "com.github.termux.termux-app", name = "terminal-view", version.ref = "termux" }
 
 # Testing
 junit = { group = "junit", name = "junit", version.ref = "junit" }

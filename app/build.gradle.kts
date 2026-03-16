@@ -116,6 +116,10 @@ dependencies {
     // DataStore (app settings)
     implementation(libs.androidx.datastore.preferences)
 
+    // Termux terminal emulator & view
+    implementation(libs.termux.terminal.emulator)
+    implementation(libs.termux.terminal.view)
+
     // Testing
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
