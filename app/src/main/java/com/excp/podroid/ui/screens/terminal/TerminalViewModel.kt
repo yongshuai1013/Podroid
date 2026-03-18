@@ -199,6 +199,8 @@ class TerminalViewModel @Inject constructor(
         val qemuOutput = object : com.termux.terminal.TerminalOutput() {
             override fun write(data: ByteArray, offset: Int, count: Int) {
                 try {
+                    val snippet = String(data, offset, count)
+                    Log.d(TAG, "TerminalOutput.write (${count}b): ${snippet.take(200).replace("\u001b", "ESC")}")
                     qemuStdin?.let {
                         it.write(data, offset, count)
                         it.flush()
@@ -299,8 +301,35 @@ class TerminalViewModel @Inject constructor(
 
         // QEMU output → feed to emulator
         qemu.onConsoleOutput = { data, len ->
+            // Scan for Device Attributes queries that the emulator doesn't handle
+            // and inject responses so TUI apps like nvim don't hang
+            val text = String(data, 0, len)
+            // Primary DA: ESC[c or ESC[0c → respond as VT220
+            if (text.contains("\u001b[c") || text.contains("\u001b[0c")) {
+                val response = "\u001b[?62;4c" // VT220 with sixel
+                try {
+                    qemuStdin?.write(response.toByteArray())
+                    qemuStdin?.flush()
+                    Log.d(TAG, "Injected DA1 response")
+                } catch (_: Exception) {}
+            }
+            // Secondary DA: ESC[>c or ESC[>0c → respond with version
+            if (text.contains("\u001b[>c") || text.contains("\u001b[>0c")) {
+                val response = "\u001b[>0;95;0c" // xterm version 95
+                try {
+                    qemuStdin?.write(response.toByteArray())
+                    qemuStdin?.flush()
+                    Log.d(TAG, "Injected DA2 response")
+                } catch (_: Exception) {}
+            }
+
             emu.append(data, len)
-            terminalView?.post { terminalView?.onScreenUpdated() }
+            terminalView?.let { view ->
+                view.post {
+                    view.onScreenUpdated()
+                    view.invalidate()
+                }
+            }
         }
 
         // Feed buffered output

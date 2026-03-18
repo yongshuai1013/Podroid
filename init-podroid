@@ -208,7 +208,12 @@ export PODMAN_IGNORE_CGROUPSV1_WARNING=1
 export CONTAINERS_CONF=/etc/containers/containers.conf
 export CONTAINERS_STORAGE_CONF=/etc/containers/storage.conf
 export CONTAINERS_REGISTRIES_CONF=/etc/containers/registries.conf
-stty rows 24 cols 80 2>/dev/null
+# Auto-detect terminal size from emulator
+if command -v resize >/dev/null 2>&1; then
+    eval "$(resize)" 2>/dev/null
+else
+    stty rows 24 cols 80 2>/dev/null
+fi
 cd /root
 PROF
 
