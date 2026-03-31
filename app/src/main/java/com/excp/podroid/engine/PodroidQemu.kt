@@ -173,7 +173,10 @@ class PodroidQemu @Inject constructor(
                             // Feed persistent emulator (renders screen buffer)
                             terminalEmulator?.append(chunk, n)
 
-                            detectBootStage(text)
+                            // Detect boot stages until "Ready" is reached
+                            if (_bootStage.value != "Ready") {
+                                detectBootStage(text)
+                            }
                             onConsoleOutput?.invoke(chunk, n)
                         }
                     } catch (e: Exception) {
