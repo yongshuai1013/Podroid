@@ -157,14 +157,16 @@ export CONTAINERS_REGISTRIES_CONF=/etc/containers/registries.conf
 
 # ── Console settings ──
 dmesg -n 1 2>/dev/null
-stty rows 24 cols 80 2>/dev/null
+# Set a sane default size. The Android app will update it via stty
+# after the terminal view is measured, but serial TTYs start at 0x0
+# which breaks TUI apps (btop, nvim) that use TIOCGWINSZ.
+stty rows 24 cols 80 -ixon -ixoff -iexten 2>/dev/null
 
 # ── Graceful shutdown handler ──
 shutdown_handler() {
     echo ""
     echo "[init] Shutting down..."
     sync
-    # Stop all running containers gracefully
     podman stop -a -t 5 2>/dev/null
     sync
     echo "[init] Goodbye."
@@ -194,9 +196,7 @@ echo ""
 echo "  Ready! Try: podman run --rm alpine echo hello"
 echo ""
 
-# ── Shell ──
-
-# Create a profile for the login shell
+# ── Profile configuration ──
 cat > /etc/profile <<'PROF'
 export HOME=/root
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
@@ -208,14 +208,22 @@ export PODMAN_IGNORE_CGROUPSV1_WARNING=1
 export CONTAINERS_CONF=/etc/containers/containers.conf
 export CONTAINERS_STORAGE_CONF=/etc/containers/storage.conf
 export CONTAINERS_REGISTRIES_CONF=/etc/containers/registries.conf
-# Auto-detect terminal size from emulator
-if command -v resize >/dev/null 2>&1; then
-    eval "$(resize)" 2>/dev/null
-else
-    stty rows 24 cols 80 2>/dev/null
-fi
+
+# Sane terminal settings for serial console
+# Don't hardcode rows/cols — the Android app sends stty with actual dimensions.
+stty -ixon -ixoff -iexten -echoctl 2>/dev/null
 cd /root
 PROF
+
+# ── Login wrapper ──
+# getty -n -l /bin/sh doesn't source /etc/profile.
+# This wrapper ensures the profile is always sourced (sets HOME, TERM, cd /root).
+cat > /usr/local/bin/podroid-login <<'LOGIN'
+#!/bin/sh
+. /etc/profile
+exec /bin/sh
+LOGIN
+chmod +x /usr/local/bin/podroid-login
 
 # Set root shell and create passwd entry if missing
 grep -q '^root:' /etc/passwd 2>/dev/null || echo "root:x:0:0:root:/root:/bin/sh" > /etc/passwd
@@ -223,7 +231,7 @@ grep -q '^root:' /etc/passwd 2>/dev/null || echo "root:x:0:0:root:/root:/bin/sh"
 # Use getty to spawn a proper login shell on the serial console.
 # getty sets up the controlling TTY correctly, enabling job control + Ctrl+C.
 while true; do
-    /sbin/getty -n -l /bin/sh 0 ttyAMA0 xterm-256color
+    /sbin/getty -n -l /usr/local/bin/podroid-login 0 ttyAMA0 xterm-256color
     sleep 1
 done
 fi

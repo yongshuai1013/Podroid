@@ -3,6 +3,7 @@
  * Copyright (C) 2024 Podroid contributors
  *
  * Foreground service that hosts the QEMU process for Podroid.
+ * Holds a WakeLock to prevent the device from sleeping while the VM runs.
  */
 package com.excp.podroid.service
 
@@ -14,6 +15,7 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.os.IBinder
+import android.os.PowerManager
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.excp.podroid.MainActivity
@@ -34,6 +36,7 @@ class PodroidService : Service() {
 
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private var launchJob: Job? = null
+    private var wakeLock: PowerManager.WakeLock? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -46,6 +49,7 @@ class PodroidService : Service() {
         when (intent?.action) {
             ACTION_START -> {
                 startForeground(NOTIFICATION_ID, buildNotification("Starting Podman..."))
+                acquireWakeLock()
                 launchPodroid()
             }
             ACTION_STOP -> {
@@ -57,7 +61,31 @@ class PodroidService : Service() {
 
     override fun onDestroy() {
         super.onDestroy()
+        releaseWakeLock()
         serviceScope.cancel()
+    }
+
+    private fun acquireWakeLock() {
+        if (wakeLock == null) {
+            val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+            wakeLock = pm.newWakeLock(
+                PowerManager.PARTIAL_WAKE_LOCK,
+                "Podroid::VmWakeLock"
+            ).apply {
+                acquire()
+            }
+            Log.d(TAG, "WakeLock acquired")
+        }
+    }
+
+    private fun releaseWakeLock() {
+        wakeLock?.let {
+            if (it.isHeld) {
+                it.release()
+                Log.d(TAG, "WakeLock released")
+            }
+        }
+        wakeLock = null
     }
 
     private fun launchPodroid() {
@@ -76,6 +104,7 @@ class PodroidService : Service() {
                 }
             }
 
+            releaseWakeLock()
             stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()
         }

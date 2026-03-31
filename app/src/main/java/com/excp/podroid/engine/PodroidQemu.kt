@@ -2,21 +2,29 @@
  * Podroid - Rootless Podman for Android
  * Copyright (C) 2024 Podroid contributors
  *
- * QEMU configuration for Podroid (Podman on Android).
- * Uses initrd approach with persistent overlay for Alpine Linux VM.
+ * QEMU engine for Podroid. Manages the VM lifecycle, serial console I/O,
+ * and a persistent terminal emulator that handles terminal queries (DA, DSR,
+ * window size) even when the UI is detached.
  */
 package com.excp.podroid.engine
 
 import android.content.Context
 import android.util.Log
 import com.excp.podroid.data.repository.PortForwardRule
+import com.termux.terminal.TerminalEmulator
+import com.termux.terminal.TerminalOutput
+import com.termux.terminal.TerminalSession
+import com.termux.terminal.TerminalSessionClient
 import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import java.io.File
 import java.io.FileOutputStream
 import java.io.OutputStream
+import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.TimeUnit
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -27,39 +35,55 @@ class PodroidQemu @Inject constructor(
     private val _state = MutableStateFlow<VmState>(VmState.Idle)
     val state: StateFlow<VmState> = _state.asStateFlow()
 
-    /** Accumulated serial console output (for fallback / logging) */
     private val _consoleText = MutableStateFlow("")
     val consoleText: StateFlow<String> = _consoleText.asStateFlow()
 
-    /** Current boot stage for UI feedback */
     private val _bootStage = MutableStateFlow("")
     val bootStage: StateFlow<String> = _bootStage.asStateFlow()
 
+    /** Persistent terminal emulator that outlives the UI. */
+    var terminalEmulator: TerminalEmulator? = null
+        private set
+
+    @Volatile
     var process: Process? = null
         private set
 
-    /** Stream to write to VM serial console (QEMU stdin) */
-    var consoleOutput: OutputStream? = null
-        private set
+    @Volatile
+    private var consoleOutputStream: OutputStream? = null
 
-    /**
-     * Callback for raw console output bytes. When set, each chunk read from
-     * QEMU stdout is forwarded here (used by TerminalViewModel).
-     */
+    private val writeQueue = LinkedBlockingQueue<ByteArray>()
+
+    /** Current terminal dimensions for responding to size queries. */
+    @Volatile var terminalRows = 24
+    @Volatile var terminalCols = 80
+
+    /** Coroutine scope for I/O threads — cancelled on stop(). */
+    private var ioScope: CoroutineScope? = null
+
+    fun writeToConsole(data: ByteArray) {
+        writeQueue.offer(data)
+    }
+
+    fun updateTerminalSize(cols: Int, rows: Int) {
+        terminalCols = cols
+        terminalRows = rows
+        terminalEmulator?.resize(cols, rows)
+    }
+
+    /** Callback for raw console output. Used by TerminalViewModel for UI refresh. */
+    @Volatile
     var onConsoleOutput: ((ByteArray, Int) -> Unit)? = null
 
-    /** QMP client for runtime VM management */
     val qmpClient: QmpClient by lazy {
         QmpClient("${context.filesDir.absolutePath}/qmp.sock")
     }
 
-    fun start() {
-        start(emptyList())
-    }
+    fun start() = start(emptyList())
 
     fun start(portForwards: List<PortForwardRule>, ramMb: Int = 1024, cpus: Int = 4) {
         if (_state.value is VmState.Starting || _state.value is VmState.Running) {
-            Log.w(TAG, "start() called while VM is in state ${_state.value}, ignoring")
+            Log.w(TAG, "start() called while VM is ${_state.value}, ignoring")
             return
         }
 
@@ -68,7 +92,6 @@ class PodroidQemu @Inject constructor(
             return
         }
 
-        // Ensure storage image exists (may have been deleted by reset)
         ensureStorageImage()
 
         _state.value = VmState.Starting
@@ -81,53 +104,90 @@ class PodroidQemu @Inject constructor(
 
             val nativeDir = context.applicationInfo.nativeLibraryDir
             val filesDir = context.filesDir.absolutePath
-            Log.d(TAG, "nativeDir: $nativeDir, filesDir: $filesDir")
 
-            val pb = ProcessBuilder(cmd)
-                .directory(context.filesDir)
+            val pb = ProcessBuilder(cmd).directory(context.filesDir)
             pb.environment()["LD_LIBRARY_PATH"] = "$nativeDir:$filesDir"
 
             val proc = pb.start()
             process = proc
-            consoleOutput = proc.outputStream
-            Log.d(TAG, "Process started")
+            consoleOutputStream = proc.outputStream
             _bootStage.value = "Booting kernel..."
 
-            // Read serial console output (stdout), log to file, and forward to listeners
+            // Create coroutine scope for I/O
+            val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+            ioScope = scope
+
+            // Writer coroutine — drains writeQueue to QEMU stdin
+            scope.launch {
+                try {
+                    while (isActive && process?.isAlive == true) {
+                        val data = writeQueue.poll(500, TimeUnit.MILLISECONDS)
+                        if (data != null) {
+                            consoleOutputStream?.write(data)
+                            consoleOutputStream?.flush()
+                        }
+                    }
+                } catch (e: Exception) {
+                    Log.d(TAG, "Console writer ended: ${e.message}")
+                }
+            }
+
+            // Initialize persistent terminal emulator.
+            // write() routes emulator responses (DA, DSR, cursor position) back
+            // to the VM so TUI apps like nvim receive the answers they need.
+            val qemuOutput = object : TerminalOutput() {
+                override fun write(data: ByteArray, offset: Int, count: Int) {
+                    writeToConsole(data.copyOfRange(offset, offset + count))
+                }
+                override fun titleChanged(oldTitle: String?, newTitle: String?) {}
+                override fun onCopyTextToClipboard(text: String?) {}
+                override fun onPasteTextFromClipboard() {}
+                override fun onBell() {}
+                override fun onColorsChanged() {}
+            }
+            terminalEmulator = TerminalEmulator(
+                qemuOutput, 80, 24, 2000, NoOpSessionClient
+            )
+
+            // Console reader — reads stdout, feeds emulator, detects boot stages
             val logFile = File(context.filesDir, "console.log")
             logFile.delete()
-            Thread({
+            scope.launch {
                 FileOutputStream(logFile, true).use { logOut ->
                     val buf = ByteArray(4096)
+                    val consoleBuilder = StringBuilder()
                     val input = proc.inputStream
                     try {
-                        while (true) {
+                        while (isActive) {
                             val n = input.read(buf)
                             if (n < 0) break
                             val chunk = buf.copyOf(n)
-                            _consoleText.value += String(chunk)
+                            val text = String(chunk)
+
+                            consoleBuilder.append(text)
+                            _consoleText.value = consoleBuilder.toString()
+
                             logOut.write(chunk, 0, n)
                             logOut.flush()
-                            // Detect boot stages from console output
-                            detectBootStage(String(chunk))
-                            // Forward to terminal session if attached
+
+                            // Feed persistent emulator (renders screen buffer)
+                            terminalEmulator?.append(chunk, n)
+
+                            detectBootStage(text)
                             onConsoleOutput?.invoke(chunk, n)
                         }
                     } catch (e: Exception) {
                         Log.d(TAG, "Console reader ended: ${e.message}")
                     }
                 }
-            }, "qemu-console-reader").apply {
-                isDaemon = true
-                start()
             }
 
-            // Drain stderr separately
-            Thread({
+            // Stderr drain
+            scope.launch {
                 try {
                     val buf = ByteArray(4096)
                     val err = proc.errorStream
-                    while (true) {
+                    while (isActive) {
                         val n = err.read(buf)
                         if (n < 0) break
                         Log.d("PodroidVM-err", String(buf, 0, n).trimEnd().take(300))
@@ -135,36 +195,29 @@ class PodroidQemu @Inject constructor(
                 } catch (e: Exception) {
                     Log.d(TAG, "Stderr drain ended: ${e.message}")
                 }
-            }, "qemu-stderr-drain").apply {
-                isDaemon = true
-                start()
             }
 
-            // After a short delay, mark as running if process is still alive
+            // Wait briefly, then mark as running if alive
             Thread.sleep(2000)
             if (proc.isAlive) {
-                Log.d(TAG, "QEMU is running!")
+                Log.d(TAG, "QEMU is running")
                 _state.value = VmState.Running
             } else {
-                Log.e(TAG, "QEMU died immediately")
                 val exitCode = proc.waitFor()
-                Log.e(TAG, "Exit code: $exitCode")
+                Log.e(TAG, "QEMU died immediately, exit code: $exitCode")
                 _state.value = VmState.Error("QEMU exited with code $exitCode")
+                cleanup()
                 return
             }
 
-            // Wait for process to exit
             val exitCode = proc.waitFor()
             Log.d(TAG, "QEMU exited with code: $exitCode")
-            process = null
-            consoleOutput = null
-
+            cleanup()
             _state.value = if (exitCode == 0) VmState.Stopped else VmState.Error("Exit code $exitCode")
         } catch (e: Exception) {
             Log.e(TAG, "Failed to start QEMU", e)
             _state.value = VmState.Error(e.message ?: "Unknown error")
-            process = null
-            consoleOutput = null
+            cleanup()
         }
     }
 
@@ -182,23 +235,21 @@ class PodroidQemu @Inject constructor(
                 _bootStage.value = "Configuring containers..."
             "Waiting for network" in text ->
                 _bootStage.value = "Waiting for network..."
-            "Found eth0" in text || "Found" in text ->
+            "Found" in text && "eth" in text ->
                 _bootStage.value = "Network found"
+            "Internet:" in text ->
+                _bootStage.value = "Checking internet..."
             "Podroid" in text && "Alpine" in text ->
                 _bootStage.value = "Almost ready..."
-            "Internet: OK" in text || "Ready!" in text ->
+            "Ready!" in text ->
                 _bootStage.value = "Ready"
         }
     }
 
     fun stop() {
-        // Send sync via serial console for graceful shutdown
         try {
-            consoleOutput?.let { out ->
-                out.write("sync\n".toByteArray())
-                out.flush()
-                Thread.sleep(500)
-            }
+            writeToConsole("sync\n".toByteArray())
+            Thread.sleep(500)
         } catch (e: Exception) {
             Log.d(TAG, "Failed to send sync: ${e.message}")
         }
@@ -208,28 +259,37 @@ class PodroidQemu @Inject constructor(
         if (process?.isAlive == true) {
             process?.destroyForcibly()
         }
-        process = null
-        consoleOutput = null
-        onConsoleOutput = null
-        _bootStage.value = ""
+        cleanup()
         _state.value = VmState.Stopped
     }
 
-    private fun buildCommand(qemuExe: File, portForwards: List<PortForwardRule>, ramMb: Int, cpus: Int): List<String> {
+    private fun cleanup() {
+        ioScope?.cancel()
+        ioScope = null
+        process = null
+        consoleOutputStream = null
+        writeQueue.clear()
+        terminalEmulator = null
+        onConsoleOutput = null
+        _bootStage.value = ""
+    }
+
+    private fun buildCommand(
+        qemuExe: File,
+        portForwards: List<PortForwardRule>,
+        ramMb: Int,
+        cpus: Int,
+    ): List<String> {
         val args = mutableListOf<String>()
 
-        // Machine & CPU
         args += "-M"; args += "virt"
         args += "-cpu"; args += "max"
         args += "-smp"; args += "$cpus"
         args += "-m"; args += "$ramMb"
         args += "-accel"; args += "tcg,thread=multi"
 
-        // Kernel & Initrd (Podroid Core)
         val kernelPath = File(context.filesDir, "vmlinuz-virt")
         val initrdPath = File(context.filesDir, "initrd.img")
-        Log.d(TAG, "kernelPath: $kernelPath, exists: ${kernelPath.exists()}")
-        Log.d(TAG, "initrdPath: $initrdPath, exists: ${initrdPath.exists()}")
 
         if (kernelPath.exists()) {
             args += "-kernel"; args += kernelPath.absolutePath
@@ -244,14 +304,12 @@ class PodroidQemu @Inject constructor(
             Log.w(TAG, "Initrd not found!")
         }
 
-        // Storage (Persistent)
         val storagePath = File(context.filesDir, "storage.img")
         if (storagePath.exists()) {
             args += "-device"; args += "virtio-blk-pci,drive=drive1"
             args += "-drive"; args += "file=${storagePath.absolutePath},if=none,id=drive1,format=raw"
         }
 
-        // Network with port forwarding
         val netdevArg = buildString {
             append("user,id=net0")
             for (rule in portForwards) {
@@ -261,17 +319,10 @@ class PodroidQemu @Inject constructor(
         args += "-netdev"; args += netdevArg
         args += "-device"; args += "virtio-net,netdev=net0"
 
-        // Serial console via stdio
         args += "-serial"; args += "stdio"
-
-        // Display (headless)
         args += "-display"; args += "none"
-
-        // QMP socket for management
         args += "-qmp"
         args += "unix:${context.filesDir.absolutePath}/qmp.sock,server,nowait"
-
-        // Misc
         args += "-overcommit"; args += "mem-lock=off"
 
         return listOf(qemuExe.absolutePath) + args
@@ -282,7 +333,7 @@ class PodroidQemu @Inject constructor(
         if (!storageFile.exists()) {
             try {
                 java.io.RandomAccessFile(storageFile, "rw").use { raf ->
-                    raf.setLength(2L * 1024 * 1024 * 1024) // 2GB sparse
+                    raf.setLength(2L * 1024 * 1024 * 1024)
                 }
                 Log.d(TAG, "Created storage.img")
             } catch (e: Exception) {
@@ -300,4 +351,24 @@ class PodroidQemu @Inject constructor(
     companion object {
         private const val TAG = "PodroidQemu"
     }
+}
+
+/** No-op TerminalSessionClient for the persistent emulator (no UI attached). */
+private object NoOpSessionClient : TerminalSessionClient {
+    override fun onTextChanged(changedSession: TerminalSession) {}
+    override fun onTitleChanged(changedSession: TerminalSession) {}
+    override fun onSessionFinished(finishedSession: TerminalSession) {}
+    override fun onCopyTextToClipboard(session: TerminalSession, text: String?) {}
+    override fun onPasteTextFromClipboard(session: TerminalSession?) {}
+    override fun onBell(session: TerminalSession) {}
+    override fun onColorsChanged(session: TerminalSession) {}
+    override fun onTerminalCursorStateChange(state: Boolean) {}
+    override fun getTerminalCursorStyle(): Int = 0
+    override fun logError(tag: String?, message: String?) {}
+    override fun logWarn(tag: String?, message: String?) {}
+    override fun logInfo(tag: String?, message: String?) {}
+    override fun logDebug(tag: String?, message: String?) {}
+    override fun logVerbose(tag: String?, message: String?) {}
+    override fun logStackTraceWithMessage(tag: String?, message: String?, e: Exception?) {}
+    override fun logStackTrace(tag: String?, e: Exception?) {}
 }

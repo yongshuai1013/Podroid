@@ -290,9 +290,9 @@ fun SettingsScreen(
             SettingsInfoRow("Version", BuildConfig.VERSION_NAME)
             SettingsInfoRow("QEMU", "10.2.1")
             SettingsInfoRow("Guest", "AArch64 (ARM64)")
-            SettingsInfoRow("Distro", "Alpine Linux")
-            SettingsInfoRow("Container", "Podman")
-            SettingsInfoRow("Storage", "Persistent (overlay)")
+            SettingsInfoRow("Distro", "Alpine Linux 3.23")
+            SettingsInfoRow("Container", "Podman + crun")
+            SettingsInfoRow("Storage", "2GB persistent (overlay)")
 
             Spacer(Modifier.height(32.dp))
         }

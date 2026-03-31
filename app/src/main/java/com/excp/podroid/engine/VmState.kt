@@ -35,7 +35,7 @@ sealed class VmState {
     /** QEMU process is initializing. */
     data object Starting : VmState()
 
-    /** VM is running and the VNC display is available. */
+    /** VM is running and the serial console is available. */
     data object Running : VmState()
 
     /** VM execution is paused (CPU halted, state preserved). */

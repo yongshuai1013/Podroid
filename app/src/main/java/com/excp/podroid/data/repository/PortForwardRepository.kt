@@ -11,6 +11,7 @@ import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringSetPreferencesKey
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -71,13 +72,10 @@ class PortForwardRepository @Inject constructor(
         }
     }
 
-    suspend fun getRulesSnapshot(): List<PortForwardRule> {
-        var result: List<PortForwardRule> = emptyList()
-        context.dataStore.edit { prefs ->
-            result = prefs[KEY_PORT_FORWARDS]
+    suspend fun getRulesSnapshot(): List<PortForwardRule> =
+        context.dataStore.data.map { prefs ->
+            prefs[KEY_PORT_FORWARDS]
                 ?.mapNotNull { PortForwardRule.deserialize(it) }
                 ?: emptyList()
-        }
-        return result
-    }
+        }.first()
 }

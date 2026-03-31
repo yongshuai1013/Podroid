@@ -8,9 +8,8 @@ package com.excp.podroid.ui.screens.terminal
 
 import android.app.Activity
 import android.graphics.Typeface
+import android.util.Log
 import android.view.WindowManager
-import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
@@ -26,6 +25,8 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -56,6 +57,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
 import com.excp.podroid.engine.VmState
+import com.termux.terminal.TerminalSession
 import com.termux.view.TerminalView
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -69,7 +71,6 @@ fun TerminalScreen(
     val bootStage by viewModel.bootStage.collectAsState()
     val fontSize by viewModel.terminalFontSize.collectAsState()
 
-    // Keep screen on and adjust for soft keyboard
     DisposableEffect(Unit) {
         val activity = context as? Activity
         activity?.window?.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
@@ -86,15 +87,15 @@ fun TerminalScreen(
             .windowInsetsPadding(WindowInsets.navigationBars)
             .windowInsetsPadding(WindowInsets.ime)
     ) {
-        // Top bar
         TopAppBar(
             title = { Text("Terminal", color = Color.White) },
             navigationIcon = {
                 IconButton(onClick = {
-                    // Hide keyboard before navigating back
                     val imm = context.getSystemService(android.content.Context.INPUT_METHOD_SERVICE)
                         as android.view.inputmethod.InputMethodManager
-                    (context as? Activity)?.currentFocus?.let { imm.hideSoftInputFromWindow(it.windowToken, 0) }
+                    (context as? Activity)?.currentFocus?.let {
+                        imm.hideSoftInputFromWindow(it.windowToken, 0)
+                    }
                     onNavigateBack()
                 }) {
                     Icon(
@@ -111,41 +112,35 @@ fun TerminalScreen(
 
         when (vmState) {
             is VmState.Idle, is VmState.Stopped -> {
-                // VM not running
                 Box(
-                    modifier = Modifier
-                        .weight(1f)
-                        .fillMaxWidth(),
-                    contentAlignment = Alignment.Center
+                    modifier = Modifier.weight(1f).fillMaxWidth(),
+                    contentAlignment = Alignment.Center,
                 ) {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         Text(
                             text = "VM Not Running",
                             color = Color.Red,
                             fontSize = 18.sp,
-                            fontWeight = FontWeight.Bold
+                            fontWeight = FontWeight.Bold,
                         )
                         Text(
                             text = "Start the VM from Home screen first",
                             color = Color.Gray,
                             fontSize = 14.sp,
-                            modifier = Modifier.padding(top = 8.dp)
+                            modifier = Modifier.padding(top = 8.dp),
                         )
                     }
                 }
             }
 
             is VmState.Starting -> {
-                // Loading screen with boot stage feedback
                 Box(
-                    modifier = Modifier
-                        .weight(1f)
-                        .fillMaxWidth(),
-                    contentAlignment = Alignment.Center
+                    modifier = Modifier.weight(1f).fillMaxWidth(),
+                    contentAlignment = Alignment.Center,
                 ) {
                     Column(
                         horizontalAlignment = Alignment.CenterHorizontally,
-                        modifier = Modifier.padding(32.dp)
+                        modifier = Modifier.padding(32.dp),
                     ) {
                         CircularProgressIndicator(
                             color = Color(0xFF4FC3F7),
@@ -156,7 +151,7 @@ fun TerminalScreen(
                             text = "Starting VM...",
                             color = Color.White,
                             fontSize = 18.sp,
-                            fontWeight = FontWeight.Bold
+                            fontWeight = FontWeight.Bold,
                         )
                         Spacer(modifier = Modifier.height(12.dp))
                         Text(
@@ -179,36 +174,31 @@ fun TerminalScreen(
 
             is VmState.Error -> {
                 Box(
-                    modifier = Modifier
-                        .weight(1f)
-                        .fillMaxWidth(),
-                    contentAlignment = Alignment.Center
+                    modifier = Modifier.weight(1f).fillMaxWidth(),
+                    contentAlignment = Alignment.Center,
                 ) {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         Text(
                             text = "Error",
                             color = Color.Red,
                             fontSize = 18.sp,
-                            fontWeight = FontWeight.Bold
+                            fontWeight = FontWeight.Bold,
                         )
                         Text(
                             text = (vmState as VmState.Error).message,
                             color = Color.Gray,
                             fontSize = 14.sp,
                             modifier = Modifier.padding(top = 8.dp, start = 16.dp, end = 16.dp),
-                            textAlign = TextAlign.Center
+                            textAlign = TextAlign.Center,
                         )
                     }
                 }
             }
 
             is VmState.Paused, is VmState.Saving, is VmState.Resuming -> {
-                // Treat like Starting — show progress
                 Box(
-                    modifier = Modifier
-                        .weight(1f)
-                        .fillMaxWidth(),
-                    contentAlignment = Alignment.Center
+                    modifier = Modifier.weight(1f).fillMaxWidth(),
+                    contentAlignment = Alignment.Center,
                 ) {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         CircularProgressIndicator(
@@ -232,63 +222,110 @@ fun TerminalScreen(
             }
 
             is VmState.Running -> {
-                // Terminal view
-                AndroidView(
-                    factory = { ctx ->
-                        TerminalView(ctx, null).apply {
-                            setTextSize(fontSize)
-                            setTypeface(Typeface.MONOSPACE)
-                            keepScreenOn = true
-                            isFocusable = true
-                            isFocusableInTouchMode = true
+                Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
+                    AndroidView(
+                        factory = { ctx ->
+                            TerminalView(ctx, null).apply {
+                                setTextSize(fontSize)
+                                setTypeface(Typeface.MONOSPACE)
+                                keepScreenOn = true
+                                isFocusable = true
+                                isFocusableInTouchMode = true
 
-                            // Create session wired to QEMU I/O (no host binaries)
-                            viewModel.createSession()
-                            viewModel.attachView(this)
-                            setTerminalViewClient(viewModel.viewClient)
+                                viewModel.createSession()
+                                viewModel.attachView(this)
+                                setTerminalViewClient(viewModel.viewClient)
 
-                            // Set session and emulator directly on the view
-                            val sess = viewModel.session ?: return@apply
-                            mTermSession = sess
-                            mEmulator = sess.emulator
+                                val sess = viewModel.session ?: return@apply
+                                mTermSession = sess
+                                mEmulator = sess.emulator
 
-                            // Request focus so keyboard works
-                            requestFocus()
+                                requestFocus()
+                                post { syncTerminalSize(this, sess, viewModel) }
+                            }
+                        },
+                        update = { view ->
+                            view.setTextSize(fontSize)
+                            val sess = viewModel.session
+                            if (sess != null) {
+                                view.post { syncTerminalSize(view, sess, viewModel) }
+                            }
+                        },
+                        modifier = Modifier.fillMaxSize(),
+                    )
 
-                            // Resize emulator to match view after layout
-                            post {
-                                if (width > 0 && height > 0 && mRenderer != null) {
-                                    try {
-                                        val rendererClass = mRenderer.javaClass
-                                        val fw = rendererClass.getDeclaredField("mFontWidth").apply { isAccessible = true }.getFloat(mRenderer)
-                                        val fls = rendererClass.getDeclaredField("mFontLineSpacing").apply { isAccessible = true }.getInt(mRenderer)
-                                        val flsa = rendererClass.getDeclaredField("mFontLineSpacingAndAscent").apply { isAccessible = true }.getInt(mRenderer)
-                                        val cols = (width / fw).toInt().coerceAtLeast(4)
-                                        val rows = ((height - flsa) / fls).coerceAtLeast(4)
-                                        sess.emulator?.resize(cols, rows)
-                                        onScreenUpdated()
-                                    } catch (_: Exception) {}
-                                }
+                    // Boot progress overlay — shown while VM is still initializing
+                    if (bootStage.isNotEmpty() && bootStage != "Ready") {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .align(Alignment.BottomCenter)
+                                .background(Color(0xDD000000))
+                                .padding(12.dp),
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.Center,
+                                modifier = Modifier.fillMaxWidth(),
+                            ) {
+                                CircularProgressIndicator(
+                                    color = Color(0xFF4FC3F7),
+                                    strokeWidth = 2.dp,
+                                    modifier = Modifier.size(16.dp),
+                                )
+                                Spacer(modifier = Modifier.width(12.dp))
+                                Text(
+                                    text = bootStage,
+                                    color = Color(0xFF4FC3F7),
+                                    fontSize = 13.sp,
+                                )
                             }
                         }
-                    },
-                    update = { view ->
-                        view.setTextSize(fontSize)
-                        view.onScreenUpdated()
-                    },
-                    modifier = Modifier
-                        .weight(1f)
-                        .fillMaxWidth(),
-                )
+                    }
+                }
             }
         }
 
-        // Extra keys row
         ExtraKeysRow(
             onKey = { viewModel.sendExtraKey(it) },
             ctrlActive = viewModel.extraCtrl,
             altActive = viewModel.extraAlt,
         )
+    }
+}
+
+private fun syncTerminalSize(
+    view: TerminalView,
+    session: TerminalSession,
+    viewModel: TerminalViewModel,
+) {
+    if (view.width <= 0 || view.height <= 0) return
+    try {
+        val renderer = view.javaClass.getDeclaredField("mRenderer")
+            .apply { isAccessible = true }.get(view) ?: return
+        val rendererClass = renderer.javaClass
+        val fw = rendererClass.getDeclaredField("mFontWidth")
+            .apply { isAccessible = true }.getFloat(renderer)
+        val fls = rendererClass.getDeclaredField("mFontLineSpacing")
+            .apply { isAccessible = true }.getInt(renderer)
+        val flsa = rendererClass.getDeclaredField("mFontLineSpacingAndAscent")
+            .apply { isAccessible = true }.getInt(renderer)
+
+        if (fw <= 0) return
+
+        val cols = (view.width / fw).toInt().coerceAtLeast(4)
+        val rows = ((view.height - flsa) / fls).coerceAtLeast(4)
+
+        if (session.emulator?.mColumns != cols || session.emulator?.mRows != rows) {
+            Log.d("TerminalScreen", "Resizing to ${cols}x${rows}")
+            session.updateSize(cols, rows)
+            viewModel.updateSize(cols, rows)
+            view.onScreenUpdated()
+            // Send stty to the VM so programs get SIGWINCH with correct size.
+            viewModel.syncSize()
+        }
+    } catch (e: Exception) {
+        Log.w("TerminalScreen", "Resize failed: ${e.message}")
     }
 }
 
@@ -309,11 +346,12 @@ private fun ExtraKeysRow(
     ) {
         ExtraKey("ESC", onKey)
         ExtraKey("TAB", onKey)
+        ExtraKey("SYNC", onKey)
         ExtraKey("CTRL", onKey, active = ctrlActive)
-        ExtraKey("\u2190", onKey, sendKey = "LEFT")     // ←
-        ExtraKey("\u2191", onKey, sendKey = "UP")       // ↑
-        ExtraKey("\u2193", onKey, sendKey = "DOWN")     // ↓
-        ExtraKey("\u2192", onKey, sendKey = "RIGHT")    // →
+        ExtraKey("\u2190", onKey, sendKey = "LEFT")
+        ExtraKey("\u2191", onKey, sendKey = "UP")
+        ExtraKey("\u2193", onKey, sendKey = "DOWN")
+        ExtraKey("\u2192", onKey, sendKey = "RIGHT")
         ExtraKey("ALT", onKey, active = altActive)
         ExtraKey("-", onKey)
         ExtraKey("/", onKey)
@@ -322,6 +360,18 @@ private fun ExtraKeysRow(
         ExtraKey("END", onKey)
         ExtraKey("PGUP", onKey)
         ExtraKey("PGDN", onKey)
+        ExtraKey("F1", onKey)
+        ExtraKey("F2", onKey)
+        ExtraKey("F3", onKey)
+        ExtraKey("F4", onKey)
+        ExtraKey("F5", onKey)
+        ExtraKey("F6", onKey)
+        ExtraKey("F7", onKey)
+        ExtraKey("F8", onKey)
+        ExtraKey("F9", onKey)
+        ExtraKey("F10", onKey)
+        ExtraKey("F11", onKey)
+        ExtraKey("F12", onKey)
     }
 }
 

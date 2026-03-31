@@ -51,6 +51,7 @@ fun HomeScreen(
     viewModel: HomeViewModel = hiltViewModel(),
 ) {
     val vmState by viewModel.vmState.collectAsStateWithLifecycle()
+    val bootStage by viewModel.bootStage.collectAsStateWithLifecycle()
 
     val isRunning = vmState is VmState.Running
     val isStarting = vmState is VmState.Starting
@@ -120,6 +121,15 @@ fun HomeScreen(
                     else -> MaterialTheme.colorScheme.onSurfaceVariant
                 },
             )
+
+            // Boot stage indicator
+            if (isStarting && bootStage.isNotEmpty()) {
+                Text(
+                    text = bootStage,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
 
             // Start/Stop Button
             Button(

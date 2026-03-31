@@ -17,6 +17,7 @@ import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.launch
 import javax.inject.Inject
 
 @HiltViewModel
@@ -25,9 +26,11 @@ class HomeViewModel @Inject constructor(
     private val podroidQemu: PodroidQemu,
 ) : ViewModel() {
 
-    /** Current QEMU lifecycle state — used to disable Start button while a VM is running. */
     val vmState: StateFlow<VmState> = podroidQemu.state
         .stateIn(viewModelScope, SharingStarted.Eagerly, VmState.Idle)
+
+    val bootStage: StateFlow<String> = podroidQemu.bootStage
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), "")
 
     /** Start Podroid (the Podman VM). */
     fun startPodroid() {
@@ -39,12 +42,11 @@ class HomeViewModel @Inject constructor(
         PodroidService.stop(context)
     }
 
-    /** Restart the VM (stop then start). */
     fun restartVm() {
         PodroidService.stop(context)
-        // Start after a brief delay to allow stop to complete
-        android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+        viewModelScope.launch {
+            kotlinx.coroutines.delay(2000)
             PodroidService.start(context)
-        }, 2000)
+        }
     }
 }
