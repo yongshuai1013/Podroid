@@ -38,7 +38,7 @@ class TerminalViewModel @Inject constructor(
     val vmState: StateFlow<VmState> = qemu.state
     val bootStage: StateFlow<String> = qemu.bootStage
     val terminalFontSize: StateFlow<Int> = settingsRepository.terminalFontSize
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 24)
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 20)
 
     private var terminalView: TerminalView? = null
     private var emulator: TerminalEmulator? = null

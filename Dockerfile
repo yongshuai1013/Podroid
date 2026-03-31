@@ -56,6 +56,12 @@ RUN apk update && apk add --no-cache \
 COPY init-podroid /init
 RUN chmod +x /init
 
+# Pin linux-virt to its installed version so apk upgrade won't touch it.
+# The kernel is loaded externally via QEMU -kernel; modules must match.
+RUN VER=$(apk info -ve linux-virt | head -1 | sed 's/^linux-virt-//') && \
+    sed -i "s/^linux-virt$/linux-virt=$VER/" /etc/apk/world && \
+    echo "Pinned: linux-virt=$VER"
+
 # Clean up apk cache to minimize image size
 RUN rm -rf /var/cache/apk/* /tmp/* /var/tmp/* \
     && rm -rf /usr/share/man /usr/share/doc

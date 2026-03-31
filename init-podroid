@@ -38,6 +38,7 @@ chmod 1777 /tmp /var/tmp
 echo "podroid" > /etc/hostname
 hostname podroid
 
+
 # ── Kernel modules ──
 echo "[init] Loading kernel modules..."
 KVER=$(uname -r)

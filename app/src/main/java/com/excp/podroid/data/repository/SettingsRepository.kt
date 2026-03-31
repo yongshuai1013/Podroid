@@ -38,13 +38,13 @@ class SettingsRepository @Inject constructor(
         .map { it[KEY_DARK_THEME] ?: true }
 
     val vmRamMb: Flow<Int> = context.dataStore.data
-        .map { it[KEY_VM_RAM] ?: 1024 }
+        .map { it[KEY_VM_RAM] ?: 512 }
 
     val vmCpus: Flow<Int> = context.dataStore.data
-        .map { it[KEY_VM_CPUS] ?: 4 }
+        .map { it[KEY_VM_CPUS] ?: 1 }
 
     val terminalFontSize: Flow<Int> = context.dataStore.data
-        .map { it[KEY_FONT_SIZE] ?: 24 }
+        .map { it[KEY_FONT_SIZE] ?: 20 }
 
     suspend fun setDarkTheme(value: Boolean) =
         context.dataStore.edit { it[KEY_DARK_THEME] = value }
@@ -59,8 +59,8 @@ class SettingsRepository @Inject constructor(
         context.dataStore.edit { it[KEY_FONT_SIZE] = value }
 
     suspend fun getVmRamMbSnapshot(): Int =
-        context.dataStore.data.map { it[KEY_VM_RAM] ?: 1024 }.first()
+        context.dataStore.data.map { it[KEY_VM_RAM] ?: 512 }.first()
 
     suspend fun getVmCpusSnapshot(): Int =
-        context.dataStore.data.map { it[KEY_VM_CPUS] ?: 4 }.first()
+        context.dataStore.data.map { it[KEY_VM_CPUS] ?: 1 }.first()
 }
