@@ -191,6 +191,18 @@ fun TerminalScreen(
                             modifier = Modifier.padding(top = 8.dp, start = 16.dp, end = 16.dp),
                             textAlign = TextAlign.Center,
                         )
+                        Spacer(modifier = Modifier.height(16.dp))
+                        Text(
+                            text = "Tap to Retry",
+                            color = Color(0xFF4FC3F7),
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(Color(0xFF333333))
+                                .clickable { onNavigateBack() }
+                                .padding(horizontal = 24.dp, vertical = 12.dp),
+                        )
                     }
                 }
             }
@@ -241,15 +253,17 @@ fun TerminalScreen(
                                 mEmulator = sess.emulator
 
                                 requestFocus()
-                                post { syncTerminalSize(this, sess, viewModel) }
+
+                                // Use layout listener to sync size once the view is actually measured
+                                addOnLayoutChangeListener { v, _, _, _, _, _, _, _, _ ->
+                                    val tv = v as TerminalView
+                                    val s = viewModel.session ?: return@addOnLayoutChangeListener
+                                    syncTerminalSize(tv, s, viewModel)
+                                }
                             }
                         },
                         update = { view ->
                             view.setTextSize(fontSize)
-                            val sess = viewModel.session
-                            if (sess != null) {
-                                view.post { syncTerminalSize(view, sess, viewModel) }
-                            }
                         },
                         modifier = Modifier.fillMaxSize(),
                     )
@@ -316,14 +330,9 @@ private fun syncTerminalSize(
         val cols = (view.width / fw).toInt().coerceAtLeast(4)
         val rows = ((view.height - flsa) / fls).coerceAtLeast(4)
 
-        if (session.emulator?.mColumns != cols || session.emulator?.mRows != rows) {
-            Log.d("TerminalScreen", "Resizing to ${cols}x${rows}")
-            session.updateSize(cols, rows)
-            viewModel.updateSize(cols, rows)
-            view.onScreenUpdated()
-            // Send stty to the VM so programs get SIGWINCH with correct size.
-            viewModel.syncSize()
-        }
+        // TerminalView auto-resizes its emulator on layout, so just sync
+        // the dimensions to QEMU (updateSize deduplicates and sends stty).
+        viewModel.updateSize(cols, rows)
     } catch (e: Exception) {
         Log.w("TerminalScreen", "Resize failed: ${e.message}")
     }

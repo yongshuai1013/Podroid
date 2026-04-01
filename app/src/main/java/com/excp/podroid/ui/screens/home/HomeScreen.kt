@@ -180,7 +180,7 @@ fun HomeScreen(
                 }
             }
 
-            // Error message
+            // Error message with retry
             if (vmState is VmState.Error) {
                 Card(
                     modifier = Modifier.fillMaxWidth(),
@@ -188,12 +188,26 @@ fun HomeScreen(
                         containerColor = MaterialTheme.colorScheme.errorContainer,
                     ),
                 ) {
-                    Text(
-                        text = (vmState as VmState.Error).message,
-                        modifier = Modifier.padding(16.dp),
-                        color = MaterialTheme.colorScheme.onErrorContainer,
-                        style = MaterialTheme.typography.bodyMedium,
-                    )
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Text(
+                            text = (vmState as VmState.Error).message,
+                            color = MaterialTheme.colorScheme.onErrorContainer,
+                            style = MaterialTheme.typography.bodyMedium,
+                        )
+                        Spacer(modifier = Modifier.height(12.dp))
+                        Button(
+                            onClick = { viewModel.startPodroid() },
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Refresh,
+                                contentDescription = null,
+                                modifier = Modifier.size(20.dp),
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("Retry")
+                        }
+                    }
                 }
             }
 

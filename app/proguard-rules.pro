@@ -1,21 +1,20 @@
-# Add project specific ProGuard rules here.
-# You can control the set of applied configuration files using the
-# proguardFiles setting in build.gradle.
-#
-# For more details, see
-#   http://developer.android.com/guide/developing/tools/proguard.html
+# Podroid ProGuard rules
 
-# If your project uses WebView with JS, uncomment the following
-# and specify the fully qualified class name to the JavaScript interface
-# class:
-#-keepclassmembers class fqcn.of.javascript.interface.for.webview {
-#   public *;
-#}
+# Termux terminal-emulator fields accessed via reflection
+-keepclassmembers class com.termux.terminal.TerminalSession {
+    private com.termux.terminal.TerminalEmulator mEmulator;
+}
 
-# Uncomment this to preserve the line number information for
-# debugging stack traces.
-#-keepattributes SourceFile,LineNumberTable
+# Termux terminal-view renderer fields accessed via reflection for size calculation
+-keepclassmembers class com.termux.view.TerminalRenderer {
+    private float mFontWidth;
+    private int mFontLineSpacing;
+    private int mFontLineSpacingAndAscent;
+}
 
-# If you keep the line number information, uncomment this to
-# hide the original source file name.
-#-renamesourcefileattribute SourceFile
+# TerminalView fields set directly from TerminalScreen
+-keepclassmembers class com.termux.view.TerminalView {
+    public com.termux.terminal.TerminalSession mTermSession;
+    public com.termux.terminal.TerminalEmulator mEmulator;
+    private com.termux.view.TerminalRenderer mRenderer;
+}

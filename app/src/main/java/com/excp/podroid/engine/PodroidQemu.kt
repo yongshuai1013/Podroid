@@ -61,6 +61,10 @@ class PodroidQemu @Inject constructor(
     /** Coroutine scope for I/O threads — cancelled on stop(). */
     private var ioScope: CoroutineScope? = null
 
+    /** Console text buffer — capped to prevent unbounded memory growth. */
+    private val consoleBuilder = StringBuilder()
+    private val maxConsoleSize = 64 * 1024 // Keep last 64KB
+
     fun writeToConsole(data: ByteArray) {
         writeQueue.offer(data)
     }
@@ -81,7 +85,7 @@ class PodroidQemu @Inject constructor(
 
     fun start() = start(emptyList())
 
-    fun start(portForwards: List<PortForwardRule>, ramMb: Int = 1024, cpus: Int = 4) {
+    fun start(portForwards: List<PortForwardRule>, ramMb: Int = 512, cpus: Int = 1) {
         if (_state.value is VmState.Starting || _state.value is VmState.Running) {
             Log.w(TAG, "start() called while VM is ${_state.value}, ignoring")
             return
@@ -95,6 +99,7 @@ class PodroidQemu @Inject constructor(
         ensureStorageImage()
 
         _state.value = VmState.Starting
+        consoleBuilder.clear()
         _consoleText.value = ""
         _bootStage.value = "Starting QEMU..."
 
@@ -155,16 +160,19 @@ class PodroidQemu @Inject constructor(
             scope.launch {
                 FileOutputStream(logFile, true).use { logOut ->
                     val buf = ByteArray(4096)
-                    val consoleBuilder = StringBuilder()
                     val input = proc.inputStream
                     try {
                         while (isActive) {
                             val n = input.read(buf)
                             if (n < 0) break
                             val chunk = buf.copyOf(n)
-                            val text = String(chunk)
+                            val text = String(chunk, Charsets.UTF_8)
 
+                            // Cap console buffer to prevent unbounded growth
                             consoleBuilder.append(text)
+                            if (consoleBuilder.length > maxConsoleSize) {
+                                consoleBuilder.delete(0, consoleBuilder.length - maxConsoleSize)
+                            }
                             _consoleText.value = consoleBuilder.toString()
 
                             logOut.write(chunk, 0, n)
@@ -213,6 +221,7 @@ class PodroidQemu @Inject constructor(
                 return
             }
 
+            // Block until QEMU exits (keeps the calling service alive)
             val exitCode = proc.waitFor()
             Log.d(TAG, "QEMU exited with code: $exitCode")
             cleanup()
@@ -252,15 +261,23 @@ class PodroidQemu @Inject constructor(
     fun stop() {
         try {
             writeToConsole("sync\n".toByteArray())
-            Thread.sleep(500)
         } catch (e: Exception) {
             Log.d(TAG, "Failed to send sync: ${e.message}")
         }
 
-        process?.destroy()
-        try { Thread.sleep(1000) } catch (_: Exception) {}
-        if (process?.isAlive == true) {
-            process?.destroyForcibly()
+        val proc = process
+        if (proc != null) {
+            proc.destroy()
+            try {
+                // Wait up to 3 seconds for graceful exit
+                val exited = proc.waitFor(3, TimeUnit.SECONDS)
+                if (!exited) {
+                    proc.destroyForcibly()
+                    proc.waitFor(2, TimeUnit.SECONDS)
+                }
+            } catch (_: Exception) {
+                proc.destroyForcibly()
+            }
         }
         cleanup()
         _state.value = VmState.Stopped

@@ -8,6 +8,10 @@
 package com.excp.podroid.ui.screens.terminal
 
 import android.content.Context
+import android.os.Build
+import android.os.VibrationEffect
+import android.os.Vibrator
+import android.os.VibratorManager
 import android.util.Log
 import android.view.KeyEvent
 import android.view.MotionEvent
@@ -23,9 +27,12 @@ import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.launch
 import javax.inject.Inject
 
 @HiltViewModel
@@ -49,6 +56,21 @@ class TerminalViewModel @Inject constructor(
     var extraCtrl = false
     var extraAlt = false
 
+    /** Last terminal size sent to the VM via stty, to avoid redundant commands. */
+    private var lastSyncedCols = 0
+    private var lastSyncedRows = 0
+    private var resizeJob: Job? = null
+
+
+    private val vibrator: Vibrator by lazy {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            (context.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as VibratorManager).defaultVibrator
+        } else {
+            @Suppress("DEPRECATION")
+            context.getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
+        }
+    }
+
     val sessionClient = object : TerminalSessionClient {
         override fun onTextChanged(changedSession: TerminalSession) {
             terminalView?.onScreenUpdated()
@@ -68,10 +90,12 @@ class TerminalViewModel @Inject constructor(
             val clip = clipboard.primaryClip
             if (clip != null && clip.itemCount > 0) {
                 val text = clip.getItemAt(0).coerceToText(context).toString()
-                qemu.writeToConsole(text.toByteArray())
+                qemu.writeToConsole(text.toByteArray(Charsets.UTF_8))
             }
         }
-        override fun onBell(session: TerminalSession) {}
+        override fun onBell(session: TerminalSession) {
+            vibrator.vibrate(VibrationEffect.createOneShot(50, VibrationEffect.DEFAULT_AMPLITUDE))
+        }
         override fun onColorsChanged(session: TerminalSession) {}
         override fun onTerminalCursorStateChange(state: Boolean) {}
         override fun getTerminalCursorStyle(): Int = 0
@@ -109,7 +133,7 @@ class TerminalViewModel @Inject constructor(
             val bytes = when (keyCode) {
                 KeyEvent.KEYCODE_ENTER -> byteArrayOf(13) // CR — getty translates to LF
                 KeyEvent.KEYCODE_DEL -> byteArrayOf(127)  // Backspace
-                KeyEvent.KEYCODE_FORWARD_DEL -> "\u001b[3~".toByteArray() // Delete key
+                KeyEvent.KEYCODE_FORWARD_DEL -> "\u001b[3~".toByteArray()
                 KeyEvent.KEYCODE_TAB -> byteArrayOf(9)
                 KeyEvent.KEYCODE_ESCAPE -> byteArrayOf(27)
                 KeyEvent.KEYCODE_DPAD_UP -> "\u001b[A".toByteArray()
@@ -121,7 +145,6 @@ class TerminalViewModel @Inject constructor(
                 KeyEvent.KEYCODE_PAGE_UP -> "\u001b[5~".toByteArray()
                 KeyEvent.KEYCODE_PAGE_DOWN -> "\u001b[6~".toByteArray()
                 KeyEvent.KEYCODE_INSERT -> "\u001b[2~".toByteArray()
-                // Function keys F1-F12
                 KeyEvent.KEYCODE_F1 -> "\u001bOP".toByteArray()
                 KeyEvent.KEYCODE_F2 -> "\u001bOQ".toByteArray()
                 KeyEvent.KEYCODE_F3 -> "\u001bOR".toByteArray()
@@ -167,7 +190,7 @@ class TerminalViewModel @Inject constructor(
             }
 
             val chars = Character.toChars(codePoint)
-            val charBytes = String(chars).toByteArray()
+            val charBytes = String(chars).toByteArray(Charsets.UTF_8)
             if (extraAlt) {
                 // Alt sends ESC prefix followed by the character
                 qemu.writeToConsole(byteArrayOf(27) + charBytes)
@@ -200,15 +223,26 @@ class TerminalViewModel @Inject constructor(
 
     fun updateSize(cols: Int, rows: Int) {
         qemu.updateTerminalSize(cols, rows)
+        if (cols != lastSyncedCols || rows != lastSyncedRows) {
+            lastSyncedCols = cols
+            lastSyncedRows = rows
+            // Debounce: wait for layout to settle (e.g. keyboard animation)
+            // before sending stty to avoid flooding the console.
+            resizeJob?.cancel()
+            resizeJob = viewModelScope.launch {
+                delay(500)
+                syncSize()
+            }
+        }
     }
 
     fun syncSize() {
         val rows = qemu.terminalRows
         val cols = qemu.terminalCols
-        // Send SIGWINCH to all processes on the serial TTY by updating stty.
-        // Ctrl-U clears the line first so it doesn't corrupt running apps.
-        val cmd = "\u0015stty rows $rows cols $cols\n"
-        qemu.writeToConsole(cmd.toByteArray())
+        if (rows <= 0 || cols <= 0) return
+        // Use the sz helper script which sets stty and erases its own echo.
+        val cmd = "\u0015sz $rows $cols\n"
+        qemu.writeToConsole(cmd.toByteArray(Charsets.UTF_8))
     }
 
     fun createSession() {
@@ -244,10 +278,6 @@ class TerminalViewModel @Inject constructor(
         } catch (e: Exception) {
             Log.e(TAG, "Reflection setup failed", e)
         }
-
-        // Don't syncSize() here — the view hasn't been measured yet.
-        // syncTerminalSize() in TerminalScreen will detect the real dimensions
-        // and call syncSize() with the correct values after layout.
 
         // QEMU output → trigger UI refresh
         qemu.onConsoleOutput = { _, _ ->

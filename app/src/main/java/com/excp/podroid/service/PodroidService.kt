@@ -23,6 +23,7 @@ import com.excp.podroid.R
 import com.excp.podroid.data.repository.PortForwardRepository
 import com.excp.podroid.data.repository.SettingsRepository
 import com.excp.podroid.engine.PodroidQemu
+import com.excp.podroid.engine.VmState
 import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.*
 import javax.inject.Inject
@@ -34,8 +35,9 @@ class PodroidService : Service() {
     @Inject lateinit var portForwardRepository: PortForwardRepository
     @Inject lateinit var settingsRepository: SettingsRepository
 
-    private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+    private val serviceScope = CoroutineScope(Job() + Dispatchers.Main)
     private var launchJob: Job? = null
+    private var notificationJob: Job? = null
     private var wakeLock: PowerManager.WakeLock? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -50,6 +52,7 @@ class PodroidService : Service() {
             ACTION_START -> {
                 startForeground(NOTIFICATION_ID, buildNotification("Starting Podman..."))
                 acquireWakeLock()
+                startNotificationUpdates()
                 launchPodroid()
             }
             ACTION_STOP -> {
@@ -61,8 +64,18 @@ class PodroidService : Service() {
 
     override fun onDestroy() {
         super.onDestroy()
+        notificationJob?.cancel()
         releaseWakeLock()
         serviceScope.cancel()
+    }
+
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        super.onTaskRemoved(rootIntent)
+        // App swiped from recents — stop the VM gracefully
+        if (podroidQemu.state.value is VmState.Running ||
+            podroidQemu.state.value is VmState.Starting) {
+            podroidQemu.stop()
+        }
     }
 
     private fun acquireWakeLock() {
@@ -88,11 +101,25 @@ class PodroidService : Service() {
         wakeLock = null
     }
 
+    private fun startNotificationUpdates() {
+        notificationJob?.cancel()
+        notificationJob = serviceScope.launch {
+            podroidQemu.bootStage
+                .collect { stage ->
+                    val status = when {
+                        stage == "Ready" || podroidQemu.state.value is VmState.Running && stage.isEmpty() ->
+                            "Podman is running"
+                        stage.isNotEmpty() -> stage
+                        else -> "Starting Podman..."
+                    }
+                    updateNotification(status)
+                }
+        }
+    }
+
     private fun launchPodroid() {
         launchJob?.cancel()
         launchJob = serviceScope.launch {
-            updateNotification("Podman is running")
-
             withContext(Dispatchers.IO) {
                 try {
                     val rules = portForwardRepository.getRulesSnapshot()

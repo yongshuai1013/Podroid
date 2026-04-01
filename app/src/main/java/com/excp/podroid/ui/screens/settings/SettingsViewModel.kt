@@ -37,13 +37,13 @@ class SettingsViewModel @Inject constructor(
     val darkTheme: Flow<Boolean> = settingsRepository.darkTheme
 
     val vmRamMb: StateFlow<Int> = settingsRepository.vmRamMb
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 1024)
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 512)
 
     val vmCpus: StateFlow<Int> = settingsRepository.vmCpus
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 4)
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 1)
 
     val terminalFontSize: StateFlow<Int> = settingsRepository.terminalFontSize
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 24)
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 20)
 
     val portForwardRules: StateFlow<List<PortForwardRule>> = portForwardRepository.rules
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())

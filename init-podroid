@@ -38,7 +38,6 @@ chmod 1777 /tmp /var/tmp
 echo "podroid" > /etc/hostname
 hostname podroid
 
-
 # ── Kernel modules ──
 echo "[init] Loading kernel modules..."
 KVER=$(uname -r)
@@ -66,7 +65,7 @@ fi
 # ── Networking ──
 echo "[init] Waiting for network..."
 NETIF=""
-for i in $(seq 1 10); do
+for i in $(seq 1 30); do
     NETIF=$(ip -o link show 2>/dev/null | awk -F': ' '{print $2}' | grep -v lo | head -1)
     [ -n "$NETIF" ] && break
     sleep 1
@@ -81,8 +80,9 @@ else
     echo "[init] WARNING: No network interface found!"
 fi
 
-# DNS (QEMU's 10.0.2.3 forwarder doesn't work on Android)
-echo "nameserver 8.8.8.8" > /etc/resolv.conf
+# DNS — try QEMU gateway forwarder first, fall back to public DNS
+echo "nameserver 10.0.2.3" > /etc/resolv.conf
+echo "nameserver 8.8.8.8" >> /etc/resolv.conf
 echo "nameserver 1.1.1.1" >> /etc/resolv.conf
 
 echo "[init] Configuring containers..."
@@ -211,10 +211,21 @@ export CONTAINERS_STORAGE_CONF=/etc/containers/storage.conf
 export CONTAINERS_REGISTRIES_CONF=/etc/containers/registries.conf
 
 # Sane terminal settings for serial console
-# Don't hardcode rows/cols — the Android app sends stty with actual dimensions.
 stty -ixon -ixoff -iexten -echoctl 2>/dev/null
+# Query terminal emulator for actual size (sets TIOCGWINSZ via escape sequence)
+resize >/dev/null 2>&1
 cd /root
 PROF
+
+# ── Silent resize helper ──
+# Called by the Android app to set terminal size without visible echo.
+# After setting stty, it erases the echoed command line so nothing is visible.
+cat > /usr/local/bin/sz <<'SZ'
+#!/bin/sh
+stty rows "$1" cols "$2" 2>/dev/null
+printf '\033[1A\033[2K'
+SZ
+chmod +x /usr/local/bin/sz
 
 # ── Login wrapper ──
 # getty -n -l /bin/sh doesn't source /etc/profile.
@@ -222,6 +233,9 @@ PROF
 cat > /usr/local/bin/podroid-login <<'LOGIN'
 #!/bin/sh
 . /etc/profile
+# Query terminal emulator for actual dimensions via escape sequence.
+# This sets TIOCGWINSZ correctly so TUI apps (vim, btop) get the right size.
+resize >/dev/null 2>&1
 exec /bin/sh
 LOGIN
 chmod +x /usr/local/bin/podroid-login
@@ -268,12 +282,16 @@ done
 
 OVERLAY_OK=false
 if [ -n "$PERSIST_DEV" ]; then
-    mount -t ext4 -o rw,noatime "$PERSIST_DEV" /mnt/persist 2>/dev/null || {
-        echo "[init] Formatting $PERSIST_DEV for persistent storage..."
+    # Try mounting; if it fails, run fsck silently before formatting
+    if ! mount -t ext4 -o rw,noatime "$PERSIST_DEV" /mnt/persist 2>/dev/null; then
         /bin/busybox --install -s 2>/dev/null
-        mkfs.ext4 -q -F "$PERSIST_DEV" 2>/dev/null
-        mount -t ext4 -o rw,noatime "$PERSIST_DEV" /mnt/persist 2>/dev/null
-    }
+        e2fsck -y "$PERSIST_DEV" >/dev/null 2>&1
+        if ! mount -t ext4 -o rw,noatime "$PERSIST_DEV" /mnt/persist 2>/dev/null; then
+            echo "[init] Formatting $PERSIST_DEV for persistent storage..."
+            mkfs.ext4 -q -F "$PERSIST_DEV" >/dev/null 2>&1
+            mount -t ext4 -o rw,noatime "$PERSIST_DEV" /mnt/persist 2>/dev/null
+        fi
+    fi
 
     if mountpoint -q /mnt/persist 2>/dev/null; then
         # Create overlay directories on persistent disk
@@ -299,6 +317,8 @@ if [ -n "$PERSIST_DEV" ]; then
 
             # Enter overlay and run main init
             exec chroot /mnt/overlay /init --main
+        else
+            echo "[init] WARNING: Overlay mount failed! Running without persistence."
         fi
     fi
 fi

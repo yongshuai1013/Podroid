@@ -21,6 +21,7 @@ class QmpClient(private val socketPath: String) {
 
     companion object {
         private const val TAG = "QmpClient"
+        private const val SOCKET_TIMEOUT_MS = 5000
     }
 
     suspend fun execute(command: String, arguments: JSONObject? = null): Result<JSONObject> =
@@ -30,6 +31,7 @@ class QmpClient(private val socketPath: String) {
                     socket.connect(
                         LocalSocketAddress(socketPath, LocalSocketAddress.Namespace.FILESYSTEM)
                     )
+                    socket.soTimeout = SOCKET_TIMEOUT_MS
 
                     val reader = BufferedReader(InputStreamReader(socket.inputStream))
                     val writer = OutputStreamWriter(socket.outputStream)

@@ -32,20 +32,41 @@ fun PodroidNavGraph(
     ) {
         composable(Routes.HOME) {
             HomeScreen(
-                onNavigateToTerminal = { navController.navigate(Routes.TERMINAL) },
-                onNavigateToSettings = { navController.navigate(Routes.SETTINGS) },
+                onNavigateToTerminal = {
+                    navController.navigate(Routes.TERMINAL) {
+                        launchSingleTop = true
+                    }
+                },
+                onNavigateToSettings = {
+                    navController.navigate(Routes.SETTINGS) {
+                        launchSingleTop = true
+                    }
+                },
             )
         }
 
         composable(Routes.TERMINAL) {
             TerminalScreen(
-                onNavigateBack = { navController.popBackStack() },
+                onNavigateBack = {
+                    // Ensure we always land back on Home, never an empty back stack
+                    if (!navController.popBackStack(Routes.HOME, inclusive = false)) {
+                        navController.navigate(Routes.HOME) {
+                            popUpTo(0) { inclusive = true }
+                        }
+                    }
+                },
             )
         }
 
         composable(Routes.SETTINGS) {
             SettingsScreen(
-                onNavigateBack = { navController.popBackStack() },
+                onNavigateBack = {
+                    if (!navController.popBackStack(Routes.HOME, inclusive = false)) {
+                        navController.navigate(Routes.HOME) {
+                            popUpTo(0) { inclusive = true }
+                        }
+                    }
+                },
             )
         }
     }
