@@ -42,7 +42,8 @@ KVER=$(uname -r)
 if [ -d "/lib/modules/$KVER" ]; then
     depmod -a 2>/dev/null
     for mod in virtio_net virtio_blk fuse tun veth bridge br_netfilter overlay \
-               xt_addrtype xt_conntrack xt_nat nf_nat nf_conntrack ip_tables; do
+               xt_addrtype xt_conntrack xt_nat nf_nat nf_conntrack ip_tables \
+               9p 9pnet 9pnet_virtio; do
         modprobe $mod 2>/dev/null
     done
 fi
@@ -79,6 +80,12 @@ fi
 echo "nameserver 10.0.2.3" > /etc/resolv.conf
 echo "nameserver 8.8.8.8"  >> /etc/resolv.conf
 echo "nameserver 1.1.1.1"  >> /etc/resolv.conf
+
+# ── Downloads folder ─────────────────────────────────────────────────────────
+mkdir -p /mnt/downloads
+if mount -t 9p -o trans=virtio,version=9p2000.L,rw downloads /mnt/downloads 2>/dev/null; then
+    echo "[init] Downloads folder mounted at /mnt/downloads"
+fi
 
 # ── Container config ─────────────────────────────────────────────────────────
 echo "[init] Configuring containers..."

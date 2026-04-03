@@ -343,6 +343,9 @@ class PodroidQemu @Inject constructor(
             args += "-drive"; args += "file=${storagePath.absolutePath},if=none,id=drive1,format=raw"
         }
 
+        // Downloads sharing via virtio-9p requires a QEMU build with virtfs enabled.
+        // The current binary does not have it — will be enabled once QEMU 11 is shipped.
+
         val netdevArg = buildString {
             append("user,id=net0")
             for (rule in portForwards) {
