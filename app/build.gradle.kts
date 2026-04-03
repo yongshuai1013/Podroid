@@ -23,8 +23,8 @@ android {
         applicationId = "com.excp.podroid"
         minSdk = 34
         targetSdk = 36
-        versionCode = 7
-        versionName = "1.0.4"
+        versionCode = 8
+        versionName = "1.0.5"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 

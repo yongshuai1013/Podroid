@@ -1,24 +1,22 @@
 #!/bin/sh
 # Podroid init — persistent Alpine Linux VM with Podman
-# Uses overlayfs on persistent storage so ALL changes survive reboots.
-# Serial console (ttyAMA0) is the primary interface.
+# Two-phase: Phase 1 mounts the overlay, Phase 2 runs the main system.
 
-# ── Phase 2: Main init (running inside persistent overlay) ──
+# ── Phase 2: Main init (running inside persistent overlay) ──────────────────
 if [ "$1" = "--main" ]; then
 
-# ── Core filesystems ──
-echo "[init] Mounting filesystems..."
+# ── Core filesystems ────────────────────────────────────────────────────────
 mount -t proc proc /proc -o noexec,nosuid,nodev
 mount -t sysfs sys /sys -o noexec,nosuid,nodev
 mount -t devtmpfs devtmpfs /dev -o exec,nosuid,mode=0755,size=2M 2>/dev/null || \
     mount -t tmpfs tmpfs /dev -o exec,nosuid,mode=0755,size=2M
 mkdir -p /dev/pts /dev/shm /dev/mqueue /dev/net
 mount -t devpts devpts /dev/pts -o gid=5,mode=0620,noexec,nosuid 2>/dev/null
-mount -t tmpfs tmpfs /dev/shm -o noexec,nosuid,nodev,size=64m
-mount -t tmpfs tmpfs /tmp -o noexec,nosuid,nodev
-mount -t tmpfs tmpfs /run -o noexec,nosuid,nodev,mode=0755
+mount -t tmpfs tmpfs /dev/shm  -o noexec,nosuid,nodev,size=64m
+mount -t tmpfs tmpfs /tmp      -o noexec,nosuid,nodev
+mount -t tmpfs tmpfs /run      -o noexec,nosuid,nodev,mode=0755
 
-# ── cgroup2 (required by podman/crun) ──
+# ── cgroup2 ─────────────────────────────────────────────────────────────────
 mkdir -p /sys/fs/cgroup
 mount -t cgroup2 cgroup2 /sys/fs/cgroup 2>/dev/null
 if [ -f /sys/fs/cgroup/cgroup.subtree_control ]; then
@@ -27,42 +25,40 @@ if [ -f /sys/fs/cgroup/cgroup.subtree_control ]; then
     done
 fi
 
-# ── Busybox + basic dirs ──
+# ── Busybox + dirs ──────────────────────────────────────────────────────────
 /bin/busybox --install -s 2>/dev/null
 mkdir -p /var/lib/containers/storage /var/log /var/tmp /root
 mkdir -p /run/lock /run/containers/storage /run/libpod
 chmod 700 /root
 chmod 1777 /tmp /var/tmp
 
-# ── Hostname ──
+# ── Hostname ─────────────────────────────────────────────────────────────────
 echo "podroid" > /etc/hostname
 hostname podroid
 
-# ── Kernel modules ──
+# ── Kernel modules ───────────────────────────────────────────────────────────
 echo "[init] Loading kernel modules..."
 KVER=$(uname -r)
 if [ -d "/lib/modules/$KVER" ]; then
     depmod -a 2>/dev/null
-    modprobe virtio_net  2>/dev/null
-    modprobe virtio_blk  2>/dev/null
-    modprobe fuse        2>/dev/null
-    modprobe tun         2>/dev/null
-    modprobe veth        2>/dev/null
-    modprobe bridge      2>/dev/null
-    modprobe br_netfilter 2>/dev/null
-    modprobe overlay     2>/dev/null
-    modprobe xt_addrtype 2>/dev/null
-    modprobe xt_conntrack 2>/dev/null
-    modprobe xt_nat      2>/dev/null
-    modprobe nf_nat      2>/dev/null
-    modprobe nf_conntrack 2>/dev/null
-    modprobe ip_tables   2>/dev/null
+    for mod in virtio_net virtio_blk fuse tun veth bridge br_netfilter overlay \
+               xt_addrtype xt_conntrack xt_nat nf_nat nf_conntrack ip_tables; do
+        modprobe $mod 2>/dev/null
+    done
 fi
-
-# Create /dev/net/tun if missing (needed by slirp4netns)
 [ ! -c /dev/net/tun ] && mknod /dev/net/tun c 10 200 2>/dev/null
 
-# ── Networking ──
+# ── Read kernel cmdline params ───────────────────────────────────────────────
+ANDROID_IP="unknown"
+SSH_ENABLED=0
+for param in $(cat /proc/cmdline); do
+    case "$param" in
+        androidip=*) ANDROID_IP="${param#androidip=}" ;;
+        ssh=1)       SSH_ENABLED=1 ;;
+    esac
+done
+
+# ── Networking ───────────────────────────────────────────────────────────────
 echo "[init] Waiting for network..."
 NETIF=""
 for i in $(seq 1 30); do
@@ -80,13 +76,12 @@ else
     echo "[init] WARNING: No network interface found!"
 fi
 
-# DNS — try QEMU gateway forwarder first, fall back to public DNS
 echo "nameserver 10.0.2.3" > /etc/resolv.conf
-echo "nameserver 8.8.8.8" >> /etc/resolv.conf
-echo "nameserver 1.1.1.1" >> /etc/resolv.conf
+echo "nameserver 8.8.8.8"  >> /etc/resolv.conf
+echo "nameserver 1.1.1.1"  >> /etc/resolv.conf
 
+# ── Container config ─────────────────────────────────────────────────────────
 echo "[init] Configuring containers..."
-# ── Sysctl for container networking ──
 sysctl -qw net.ipv4.ip_forward=1 2>/dev/null
 sysctl -qw net.ipv4.conf.all.forwarding=1 2>/dev/null
 sysctl -qw net.bridge.bridge-nf-call-iptables=1 2>/dev/null
@@ -96,14 +91,11 @@ sysctl -qw kernel.unprivileged_userns_clone=1 2>/dev/null
 sysctl -qw fs.inotify.max_user_instances=256 2>/dev/null
 sysctl -qw fs.inotify.max_user_watches=65536 2>/dev/null
 
-# ── User/group config (only if not already customized) ──
 [ -f /etc/subuid ] || echo "root:100000:65536" > /etc/subuid
 [ -f /etc/subgid ] || echo "root:100000:65536" > /etc/subgid
 
-# ── Podman configuration (only write defaults on first boot) ──
 if [ ! -f /etc/containers/containers.conf ]; then
     mkdir -p /etc/containers
-
     cat > /etc/containers/containers.conf <<'CONF'
 [containers]
 cgroups = "enabled"
@@ -135,7 +127,6 @@ unqualified-search-registries = ["docker.io", "quay.io"]
 CONF
 fi
 
-# ── crun config ──
 if [ ! -f /etc/crun/crun.conf ]; then
     mkdir -p /etc/crun
     cat > /etc/crun/crun.conf <<'CONF'
@@ -144,7 +135,44 @@ no-pivot = true
 CONF
 fi
 
-# ── Environment ──
+# ── SSH setup ────────────────────────────────────────────────────────────────
+if [ "$SSH_ENABLED" = "1" ]; then
+    echo "[init] Starting SSH server..."
+
+    # Set a default root password on first boot
+    if [ ! -f /etc/podroid-ssh-init ]; then
+        echo "root:podroid" | chpasswd 2>/dev/null
+        touch /etc/podroid-ssh-init
+    fi
+
+    # Generate host keys if missing
+    mkdir -p /etc/ssh
+    ssh-keygen -A >/dev/null 2>&1
+
+    # Write sshd config
+    cat > /etc/ssh/sshd_config <<'SSHD'
+Port 22
+PermitRootLogin yes
+PasswordAuthentication yes
+PubkeyAuthentication yes
+AuthorizedKeysFile .ssh/authorized_keys
+X11Forwarding no
+PrintMotd no
+AcceptEnv LANG LC_*
+Subsystem sftp /usr/lib/ssh/sftp-server
+SSHD
+
+    mkdir -p /root/.ssh
+    chmod 700 /root/.ssh
+
+    if /usr/sbin/sshd; then
+        echo "[init] SSH server started on port 22 (host port 9922)"
+    else
+        echo "[init] WARNING: SSH server failed to start"
+    fi
+fi
+
+# ── Environment ──────────────────────────────────────────────────────────────
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 export HOME=/root
 export TERM=xterm-256color
@@ -156,14 +184,11 @@ export CONTAINERS_CONF=/etc/containers/containers.conf
 export CONTAINERS_STORAGE_CONF=/etc/containers/storage.conf
 export CONTAINERS_REGISTRIES_CONF=/etc/containers/registries.conf
 
-# ── Console settings ──
+# ── Console settings ─────────────────────────────────────────────────────────
 dmesg -n 1 2>/dev/null
-# Set a sane default size. The Android app will update it via stty
-# after the terminal view is measured, but serial TTYs start at 0x0
-# which breaks TUI apps (btop, nvim) that use TIOCGWINSZ.
 stty rows 24 cols 80 -ixon -ixoff -iexten 2>/dev/null
 
-# ── Graceful shutdown handler ──
+# ── Shutdown handler ─────────────────────────────────────────────────────────
 shutdown_handler() {
     echo ""
     echo "[init] Shutting down..."
@@ -174,30 +199,40 @@ shutdown_handler() {
 }
 trap shutdown_handler TERM INT HUP
 
-# ── Banner ──
-IP=$(ip addr show "$NETIF" 2>/dev/null | grep 'inet ' | awk '{print $2}' | cut -d'/' -f1)
-PERSISTENT="yes"
-[ -f /mnt/persist/.overlay-active ] || PERSISTENT="no (running from initramfs)"
-echo ""
-echo "=========================================="
-echo "  Podroid - Alpine Linux + Podman"
-echo "=========================================="
-echo "  IP:         ${IP:-no network}"
-echo "  DNS:        8.8.8.8"
-echo "  Persistent: ${PERSISTENT}"
-echo ""
-
-# Quick connectivity check (synchronous so output doesn't overlap shell prompt)
+# ── Internet check ───────────────────────────────────────────────────────────
+INTERNET="no"
 if wget -q -O /dev/null --timeout=5 http://dl-cdn.alpinelinux.org/alpine/MIRRORS.txt 2>/dev/null; then
-    echo "  Internet:   OK"
-else
-    echo "  Internet:   unavailable"
+    INTERNET="yes"
 fi
-echo ""
-echo "  Ready! Try: podman run --rm alpine echo hello"
-echo ""
 
-# ── Profile configuration ──
+# ── MOTD ─────────────────────────────────────────────────────────────────────
+VM_IP=$(ip addr show "$NETIF" 2>/dev/null | grep 'inet ' | awk '{print $2}' | cut -d'/' -f1)
+STORAGE_GB=$(df -BG / 2>/dev/null | awk 'NR==2 {gsub(/G/,"",$2); print $2}')
+
+SSH_LINE=""
+if [ "$SSH_ENABLED" = "1" ]; then
+    SSH_LINE="  ssh root@${ANDROID_IP} -p 9922  (pass: podroid)"
+fi
+
+cat > /etc/motd <<MOTD
+
+  ____          _              _     _
+ |  _ \ ___  __| |_ __ ___ (_) __| |
+ | |_) / _ \/ _\` | '__/ _ \| |/ _\` |
+ |  __/ (_) | (_| | | | (_) | | (_| |
+ |_|   \___/ \__,_|_|  \___/|_|\__,_|
+
+  Alpine 3.23  ·  Podman  ·  QEMU
+
+  ip ${VM_IP:-10.0.2.15}  ·  internet ${INTERNET}  ·  storage ${STORAGE_GB:-?} GB
+${SSH_LINE}
+
+  podman run --rm -it alpine sh
+  podman run -d -p 8080:80 nginx
+
+MOTD
+
+# ── Profile ───────────────────────────────────────────────────────────────────
 cat > /etc/profile <<'PROF'
 export HOME=/root
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
@@ -209,17 +244,11 @@ export PODMAN_IGNORE_CGROUPSV1_WARNING=1
 export CONTAINERS_CONF=/etc/containers/containers.conf
 export CONTAINERS_STORAGE_CONF=/etc/containers/storage.conf
 export CONTAINERS_REGISTRIES_CONF=/etc/containers/registries.conf
-
-# Sane terminal settings for serial console
 stty -ixon -ixoff -iexten -echoctl 2>/dev/null
-# Query terminal emulator for actual size (sets TIOCGWINSZ via escape sequence)
-resize >/dev/null 2>&1
 cd /root
 PROF
 
-# ── Silent resize helper ──
-# Called by the Android app to set terminal size without visible echo.
-# After setting stty, it erases the echoed command line so nothing is visible.
+# ── Silent resize helper ─────────────────────────────────────────────────────
 cat > /usr/local/bin/sz <<'SZ'
 #!/bin/sh
 stty rows "$1" cols "$2" 2>/dev/null
@@ -227,51 +256,41 @@ printf '\033[1A\033[2K'
 SZ
 chmod +x /usr/local/bin/sz
 
-# ── Login wrapper ──
-# getty -n -l /bin/sh doesn't source /etc/profile.
-# This wrapper ensures the profile is always sourced (sets HOME, TERM, cd /root).
+# ── Login wrapper ─────────────────────────────────────────────────────────────
 cat > /usr/local/bin/podroid-login <<'LOGIN'
 #!/bin/sh
 . /etc/profile
-# Query terminal emulator for actual dimensions via escape sequence.
-# This sets TIOCGWINSZ correctly so TUI apps (vim, btop) get the right size.
+cat /etc/motd
 resize >/dev/null 2>&1
 exec /bin/sh
 LOGIN
 chmod +x /usr/local/bin/podroid-login
 
-# Set root shell and create passwd entry if missing
 grep -q '^root:' /etc/passwd 2>/dev/null || echo "root:x:0:0:root:/root:/bin/sh" > /etc/passwd
 
-# Use getty to spawn a proper login shell on the serial console.
-# getty sets up the controlling TTY correctly, enabling job control + Ctrl+C.
 while true; do
     /sbin/getty -n -l /usr/local/bin/podroid-login 0 ttyAMA0 xterm-256color
     sleep 1
 done
 fi
 
-# ══════════════════════════════════════════════════════════════
-# Phase 1: Early init — mount persistent storage and overlay
-# ══════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
+# Phase 1: Early init — mount persistent storage and pivot to overlay
+# ══════════════════════════════════════════════════════════════════════════════
 
-# Minimal filesystems needed to find and mount the disk
 mount -t proc proc /proc -o noexec,nosuid,nodev
 mount -t sysfs sys /sys -o noexec,nosuid,nodev
 mount -t devtmpfs devtmpfs /dev -o exec,nosuid,mode=0755,size=2M 2>/dev/null || \
     mount -t tmpfs tmpfs /dev -o exec,nosuid,mode=0755,size=2M
 
-# Load virtio_blk early so the persistent disk is visible
 KVER=$(uname -r)
 if [ -d "/lib/modules/$KVER" ]; then
     depmod -a 2>/dev/null
     modprobe virtio_blk 2>/dev/null
 fi
 
-# Silence kernel during setup
 echo 1 > /proc/sys/kernel/printk 2>/dev/null
 
-# ── Find and mount persistent storage ──
 mkdir -p /mnt/persist
 PERSIST_DEV=""
 for dev in /dev/vda /dev/vdb; do
@@ -282,7 +301,6 @@ done
 
 OVERLAY_OK=false
 if [ -n "$PERSIST_DEV" ]; then
-    # Try mounting; if it fails, run fsck silently before formatting
     if ! mount -t ext4 -o rw,noatime "$PERSIST_DEV" /mnt/persist 2>/dev/null; then
         /bin/busybox --install -s 2>/dev/null
         e2fsck -y "$PERSIST_DEV" >/dev/null 2>&1
@@ -294,28 +312,19 @@ if [ -n "$PERSIST_DEV" ]; then
     fi
 
     if mountpoint -q /mnt/persist 2>/dev/null; then
-        # Create overlay directories on persistent disk
         mkdir -p /mnt/persist/upper /mnt/persist/work /mnt/overlay
 
-        # Mount overlay: lower=initramfs, upper=persistent disk
         mount -t overlay overlay \
             -o lowerdir=/,upperdir=/mnt/persist/upper,workdir=/mnt/persist/work \
             /mnt/overlay 2>/dev/null
 
         if mountpoint -q /mnt/overlay 2>/dev/null; then
-            # Bind the persistent disk into the overlay for direct access
             mkdir -p /mnt/overlay/mnt/persist
             mount --bind /mnt/persist /mnt/overlay/mnt/persist
-
-            # Mark overlay as active
             touch /mnt/persist/.overlay-active
-
-            # Unmount early mounts (will be re-created in phase 2)
             umount /dev 2>/dev/null
             umount /sys 2>/dev/null
             umount /proc 2>/dev/null
-
-            # Enter overlay and run main init
             exec chroot /mnt/overlay /init --main
         else
             echo "[init] WARNING: Overlay mount failed! Running without persistence."
@@ -323,7 +332,6 @@ if [ -n "$PERSIST_DEV" ]; then
     fi
 fi
 
-# ── Fallback: no persistent storage, run directly ──
 echo "[init] WARNING: No persistent storage — changes will be lost on reboot!"
 umount /dev 2>/dev/null
 umount /sys 2>/dev/null

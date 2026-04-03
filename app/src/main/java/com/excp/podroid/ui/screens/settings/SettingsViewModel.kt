@@ -45,6 +45,15 @@ class SettingsViewModel @Inject constructor(
     val terminalFontSize: StateFlow<Int> = settingsRepository.terminalFontSize
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 20)
 
+    val storageSizeGb: StateFlow<Int> = settingsRepository.storageSizeGb
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 2)
+
+    val sshEnabled: Flow<Boolean> = settingsRepository.sshEnabled
+
+    fun setSshEnabled(value: Boolean) {
+        viewModelScope.launch { settingsRepository.setSshEnabled(value) }
+    }
+
     val portForwardRules: StateFlow<List<PortForwardRule>> = portForwardRepository.rules
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 

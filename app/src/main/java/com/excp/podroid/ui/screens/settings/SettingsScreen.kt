@@ -1,9 +1,3 @@
-/*
- * Podroid - Rootless Podman for Android
- * Copyright (C) 2024 Podroid contributors
- *
- * Settings screen for Podroid.
- */
 package com.excp.podroid.ui.screens.settings
 
 import androidx.compose.foundation.layout.Arrangement
@@ -25,6 +19,7 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.RestartAlt
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -47,6 +42,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
@@ -54,6 +50,8 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.excp.podroid.BuildConfig
 import com.excp.podroid.data.repository.PortForwardRule
 import com.excp.podroid.engine.VmState
+
+private val storageSizes = listOf(2, 4, 8, 16, 32, 64)
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -67,6 +65,8 @@ fun SettingsScreen(
     val vmRamMb by viewModel.vmRamMb.collectAsStateWithLifecycle()
     val vmCpus by viewModel.vmCpus.collectAsStateWithLifecycle()
     val terminalFontSize by viewModel.terminalFontSize.collectAsStateWithLifecycle()
+    val storageSizeGb by viewModel.storageSizeGb.collectAsStateWithLifecycle()
+    val sshEnabled by viewModel.sshEnabled.collectAsStateWithLifecycle(false)
     var showAddDialog by remember { mutableStateOf(false) }
     var showResetDialog by remember { mutableStateOf(false) }
 
@@ -95,22 +95,23 @@ fun SettingsScreen(
         ) {
             Spacer(Modifier.height(8.dp))
 
-            SettingsSectionHeader("Display")
+            // ── Display ──────────────────────────────────────────────
+            SettingsSectionHeader("Appearance")
 
             SettingsSwitchRow(
                 title = "Dark theme",
-                subtitle = "Use dark color scheme",
+                subtitle = "Use a dark color scheme",
                 checked = darkTheme,
                 onCheckedChange = { viewModel.setDarkTheme(it) },
             )
 
             Spacer(Modifier.height(16.dp))
 
-            // Terminal Section
+            // ── Terminal ─────────────────────────────────────────────
             SettingsSectionHeader("Terminal")
 
             Text(
-                text = "Font size: $terminalFontSize",
+                text = "Font size: $terminalFontSize sp",
                 style = MaterialTheme.typography.bodyMedium,
             )
             Slider(
@@ -123,12 +124,12 @@ fun SettingsScreen(
 
             Spacer(Modifier.height(16.dp))
 
-            // VM Resources Section
+            // ── VM Resources ─────────────────────────────────────────
             SettingsSectionHeader("VM Resources")
 
             if (!vmNotRunning) {
                 Text(
-                    text = "Stop the VM to change these settings",
+                    text = "Stop the VM to change these settings.",
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.error,
                     modifier = Modifier.padding(bottom = 8.dp),
@@ -136,7 +137,7 @@ fun SettingsScreen(
             }
 
             Text(
-                text = "Memory: ${vmRamMb} MB",
+                text = "Memory: $vmRamMb MB",
                 style = MaterialTheme.typography.bodyMedium,
             )
             Row(
@@ -151,15 +152,18 @@ fun SettingsScreen(
                         enabled = vmNotRunning,
                         modifier = Modifier.weight(1f),
                         colors = if (vmRamMb == ram) {
-                            androidx.compose.material3.ButtonDefaults.filledTonalButtonColors(
+                            ButtonDefaults.filledTonalButtonColors(
                                 containerColor = MaterialTheme.colorScheme.primary,
                                 contentColor = MaterialTheme.colorScheme.onPrimary,
                             )
                         } else {
-                            androidx.compose.material3.ButtonDefaults.filledTonalButtonColors()
+                            ButtonDefaults.filledTonalButtonColors()
                         },
                     ) {
-                        Text(if (ram >= 1024) "${ram / 1024}G" else "${ram}M", style = MaterialTheme.typography.labelSmall)
+                        Text(
+                            if (ram >= 1024) "${ram / 1024}G" else "${ram}M",
+                            style = MaterialTheme.typography.labelSmall,
+                        )
                     }
                 }
             }
@@ -182,12 +186,12 @@ fun SettingsScreen(
                         enabled = vmNotRunning,
                         modifier = Modifier.weight(1f),
                         colors = if (vmCpus == cpu) {
-                            androidx.compose.material3.ButtonDefaults.filledTonalButtonColors(
+                            ButtonDefaults.filledTonalButtonColors(
                                 containerColor = MaterialTheme.colorScheme.primary,
                                 contentColor = MaterialTheme.colorScheme.onPrimary,
                             )
                         } else {
-                            androidx.compose.material3.ButtonDefaults.filledTonalButtonColors()
+                            ButtonDefaults.filledTonalButtonColors()
                         },
                     ) {
                         Text("$cpu", style = MaterialTheme.typography.labelSmall)
@@ -195,14 +199,40 @@ fun SettingsScreen(
                 }
             }
 
+            Spacer(Modifier.height(8.dp))
+
+            // SSH
+            SettingsSwitchRow(
+                title = "Enable SSH",
+                subtitle = if (sshEnabled)
+                    "ssh root@<phone-ip> -p 9922  |  password: podroid"
+                else
+                    "Access the VM over your local network via SSH",
+                checked = sshEnabled,
+                onCheckedChange = { viewModel.setSshEnabled(it) },
+            )
+
+            Spacer(Modifier.height(4.dp))
+
+            // Storage size (read-only — set at first boot)
+            Text(
+                text = "Persistent storage: $storageSizeGb GB",
+                style = MaterialTheme.typography.bodyMedium,
+            )
+            Text(
+                text = "Set during initial setup. Reset the VM to change.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(top = 2.dp, bottom = 8.dp),
+            )
+
             Spacer(Modifier.height(16.dp))
 
-            // Port Forwarding Section
+            // ── Port Forwarding ───────────────────────────────────────
             SettingsSectionHeader("Port Forwarding")
 
             Text(
-                text = "Forward ports from the VM to your Android device. " +
-                    "Changes apply immediately if the VM is running.",
+                text = "Forward ports from the VM to your Android device. Rules apply immediately when the VM is running.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(bottom = 8.dp),
@@ -210,7 +240,7 @@ fun SettingsScreen(
 
             if (portForwardRules.isEmpty()) {
                 Text(
-                    text = "No port forwards configured",
+                    text = "No rules configured.",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(vertical = 8.dp),
@@ -237,7 +267,7 @@ fun SettingsScreen(
 
             if (vmState is VmState.Running) {
                 Text(
-                    text = "VM is running - changes apply immediately via QMP",
+                    text = "VM is running — new rules take effect immediately.",
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.primary,
                     modifier = Modifier.padding(top = 4.dp),
@@ -246,7 +276,7 @@ fun SettingsScreen(
 
             Spacer(Modifier.height(16.dp))
 
-            // Diagnostics Section
+            // ── Diagnostics ───────────────────────────────────────────
             SettingsSectionHeader("Diagnostics")
 
             FilledTonalButton(
@@ -264,19 +294,19 @@ fun SettingsScreen(
                 onClick = { showResetDialog = true },
                 enabled = vmNotRunning,
                 modifier = Modifier.fillMaxWidth(),
-                colors = androidx.compose.material3.ButtonDefaults.filledTonalButtonColors(
+                colors = ButtonDefaults.filledTonalButtonColors(
                     containerColor = MaterialTheme.colorScheme.errorContainer,
                     contentColor = MaterialTheme.colorScheme.onErrorContainer,
                 ),
             ) {
                 Icon(Icons.Default.RestartAlt, contentDescription = null)
                 Spacer(Modifier.width(8.dp))
-                Text("Reset VM")
+                Text("Reset VM Storage")
             }
 
             if (!vmNotRunning) {
                 Text(
-                    text = "Stop the VM before resetting",
+                    text = "Stop the VM before resetting.",
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.error,
                     modifier = Modifier.padding(top = 4.dp),
@@ -285,14 +315,15 @@ fun SettingsScreen(
 
             Spacer(Modifier.height(16.dp))
 
+            // ── About ─────────────────────────────────────────────────
             SettingsSectionHeader("About")
 
             SettingsInfoRow("Version", BuildConfig.VERSION_NAME)
             SettingsInfoRow("QEMU", "10.2.1")
-            SettingsInfoRow("Guest", "AArch64 (ARM64)")
-            SettingsInfoRow("Distro", "Alpine Linux 3.23")
-            SettingsInfoRow("Container", "Podman + crun")
-            SettingsInfoRow("Storage", "2GB persistent (overlay)")
+            SettingsInfoRow("Architecture", "AArch64 (ARM64)")
+            SettingsInfoRow("Linux distro", "Alpine Linux 3.23")
+            SettingsInfoRow("Container runtime", "Podman + crun")
+            SettingsInfoRow("Storage", "$storageSizeGb GB persistent overlay")
 
             Spacer(Modifier.height(32.dp))
         }
@@ -311,9 +342,12 @@ fun SettingsScreen(
     if (showResetDialog) {
         AlertDialog(
             onDismissRequest = { showResetDialog = false },
-            title = { Text("Reset VM") },
+            title = { Text("Reset VM storage?") },
             text = {
-                Text("This will delete all persistent storage including installed packages, containers, and data. The VM will start fresh on next boot.")
+                Text(
+                    "This permanently deletes all persistent data — installed packages, " +
+                    "container images, and files. The VM will start fresh on next boot."
+                )
             },
             confirmButton = {
                 TextButton(onClick = {
@@ -333,10 +367,7 @@ fun SettingsScreen(
 }
 
 @Composable
-private fun PortForwardRuleRow(
-    rule: PortForwardRule,
-    onDelete: () -> Unit,
-) {
+private fun PortForwardRuleRow(rule: PortForwardRule, onDelete: () -> Unit) {
     Card(
         modifier = Modifier
             .fillMaxWidth()
@@ -353,8 +384,9 @@ private fun PortForwardRuleRow(
         ) {
             Column(modifier = Modifier.weight(1f)) {
                 Text(
-                    text = "Host :${rule.hostPort}  ->  VM :${rule.guestPort}",
+                    text = "localhost:${rule.hostPort}  →  VM:${rule.guestPort}",
                     style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.Medium,
                 )
                 Text(
                     text = rule.protocol.uppercase(),
@@ -365,7 +397,7 @@ private fun PortForwardRuleRow(
             IconButton(onClick = onDelete) {
                 Icon(
                     Icons.Default.Delete,
-                    contentDescription = "Remove",
+                    contentDescription = "Remove rule",
                     tint = MaterialTheme.colorScheme.error,
                 )
             }
@@ -384,13 +416,14 @@ private fun AddPortForwardDialog(
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Add Port Forward") },
+        title = { Text("Add port forward") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 OutlinedTextField(
                     value = hostPort,
                     onValueChange = { hostPort = it; error = null },
-                    label = { Text("Host port (Android)") },
+                    label = { Text("Android port") },
+                    placeholder = { Text("e.g. 8080") },
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
@@ -399,6 +432,7 @@ private fun AddPortForwardDialog(
                     value = guestPort,
                     onValueChange = { guestPort = it; error = null },
                     label = { Text("VM port") },
+                    placeholder = { Text("e.g. 80") },
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
@@ -417,7 +451,7 @@ private fun AddPortForwardDialog(
                 val hp = hostPort.toIntOrNull()
                 val gp = guestPort.toIntOrNull()
                 if (hp == null || gp == null || hp !in 1..65535 || gp !in 1..65535) {
-                    error = "Enter valid ports (1-65535)"
+                    error = "Enter valid port numbers (1–65535)"
                     return@TextButton
                 }
                 onAdd(hp, gp, "tcp")
@@ -426,9 +460,7 @@ private fun AddPortForwardDialog(
             }
         },
         dismissButton = {
-            TextButton(onClick = onDismiss) {
-                Text("Cancel")
-            }
+            TextButton(onClick = onDismiss) { Text("Cancel") }
         },
     )
 }

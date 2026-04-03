@@ -1,21 +1,21 @@
-/*
- * Podroid - Rootless Podman for Android
- * Copyright (C) 2024 Podroid contributors
- *
- * Home screen ViewModel for Podroid.
- */
 package com.excp.podroid.ui.screens.home
 
 import android.content.Context
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.excp.podroid.BuildConfig
+import com.excp.podroid.data.repository.UpdateInfo
+import com.excp.podroid.data.repository.UpdateRepository
 import com.excp.podroid.engine.PodroidQemu
 import com.excp.podroid.engine.VmState
 import com.excp.podroid.service.PodroidService
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import javax.inject.Inject
@@ -24,6 +24,7 @@ import javax.inject.Inject
 class HomeViewModel @Inject constructor(
     @ApplicationContext private val context: Context,
     private val podroidQemu: PodroidQemu,
+    private val updateRepository: UpdateRepository,
 ) : ViewModel() {
 
     val vmState: StateFlow<VmState> = podroidQemu.state
@@ -32,12 +33,34 @@ class HomeViewModel @Inject constructor(
     val bootStage: StateFlow<String> = podroidQemu.bootStage
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), "")
 
-    /** Start Podroid (the Podman VM). */
+    private val _updateInfo = MutableStateFlow<UpdateInfo?>(null)
+    val updateInfo: StateFlow<UpdateInfo?> = _updateInfo.asStateFlow()
+
+    init {
+        checkForUpdate()
+    }
+
+    private fun checkForUpdate() {
+        viewModelScope.launch {
+            val info = updateRepository.checkForUpdate(BuildConfig.VERSION_NAME) ?: return@launch
+            if (!updateRepository.isDismissed(info.latestVersion)) {
+                _updateInfo.value = info
+            }
+        }
+    }
+
+    fun dismissUpdate() {
+        val version = _updateInfo.value?.latestVersion ?: return
+        _updateInfo.value = null
+        viewModelScope.launch {
+            updateRepository.dismissUpdate(version)
+        }
+    }
+
     fun startPodroid() {
         PodroidService.start(context)
     }
 
-    /** Stop the running Podman VM. */
     fun stopVm() {
         PodroidService.stop(context)
     }
@@ -45,7 +68,7 @@ class HomeViewModel @Inject constructor(
     fun restartVm() {
         PodroidService.stop(context)
         viewModelScope.launch {
-            kotlinx.coroutines.delay(2000)
+            delay(2000)
             PodroidService.start(context)
         }
     }

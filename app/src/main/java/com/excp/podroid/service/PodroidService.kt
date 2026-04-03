@@ -122,10 +122,18 @@ class PodroidService : Service() {
         launchJob = serviceScope.launch {
             withContext(Dispatchers.IO) {
                 try {
-                    val rules = portForwardRepository.getRulesSnapshot()
+                    val rules = portForwardRepository.getRulesSnapshot().toMutableList()
                     val ramMb = settingsRepository.getVmRamMbSnapshot()
                     val cpus = settingsRepository.getVmCpusSnapshot()
-                    podroidQemu.start(rules, ramMb, cpus)
+                    val sshEnabled = settingsRepository.getSshEnabledSnapshot()
+
+                    // Auto-inject SSH port forward when SSH is enabled
+                    if (sshEnabled && rules.none { it.hostPort == SSH_HOST_PORT }) {
+                        rules.add(com.excp.podroid.data.repository.PortForwardRule(SSH_HOST_PORT, 22, "tcp"))
+                    }
+
+                    val androidIp = getAndroidLocalIp()
+                    podroidQemu.start(rules, ramMb, cpus, sshEnabled, androidIp)
                 } catch (e: Exception) {
                     Log.e(TAG, "QEMU failed to start", e)
                 }
@@ -135,6 +143,16 @@ class PodroidService : Service() {
             stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()
         }
+    }
+
+    private fun getAndroidLocalIp(): String {
+        return try {
+            java.net.NetworkInterface.getNetworkInterfaces()
+                ?.asSequence()
+                ?.flatMap { it.inetAddresses.asSequence() }
+                ?.firstOrNull { !it.isLoopbackAddress && it is java.net.Inet4Address }
+                ?.hostAddress ?: "unknown"
+        } catch (_: Exception) { "unknown" }
     }
 
     private fun createNotificationChannel() {
@@ -183,8 +201,9 @@ class PodroidService : Service() {
         private const val CHANNEL_ID = "podroid_service"
         private const val NOTIFICATION_ID = 1001
 
-        const val ACTION_START = "com.excp.podroid.action.START"
-        const val ACTION_STOP  = "com.excp.podroid.action.STOP"
+        const val ACTION_START   = "com.excp.podroid.action.START"
+        const val ACTION_STOP    = "com.excp.podroid.action.STOP"
+        const val SSH_HOST_PORT  = 9922
 
         fun start(context: Context) {
             val intent = Intent(context, PodroidService::class.java).apply {

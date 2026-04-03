@@ -31,6 +31,7 @@ import javax.inject.Singleton
 @Singleton
 class PodroidQemu @Inject constructor(
     @ApplicationContext private val context: Context,
+    private val settingsRepository: com.excp.podroid.data.repository.SettingsRepository,
 ) {
     private val _state = MutableStateFlow<VmState>(VmState.Idle)
     val state: StateFlow<VmState> = _state.asStateFlow()
@@ -85,7 +86,13 @@ class PodroidQemu @Inject constructor(
 
     fun start() = start(emptyList())
 
-    fun start(portForwards: List<PortForwardRule>, ramMb: Int = 512, cpus: Int = 1) {
+    fun start(
+        portForwards: List<PortForwardRule>,
+        ramMb: Int = 512,
+        cpus: Int = 1,
+        sshEnabled: Boolean = false,
+        androidIp: String = "unknown",
+    ) {
         if (_state.value is VmState.Starting || _state.value is VmState.Running) {
             Log.w(TAG, "start() called while VM is ${_state.value}, ignoring")
             return
@@ -104,7 +111,7 @@ class PodroidQemu @Inject constructor(
         _bootStage.value = "Starting QEMU..."
 
         try {
-            val cmd = buildCommand(qemuExe, portForwards, ramMb, cpus)
+            val cmd = buildCommand(qemuExe, portForwards, ramMb, cpus, sshEnabled, androidIp)
             Log.d(TAG, "Launching: ${cmd.joinToString(" ")}")
 
             val nativeDir = context.applicationInfo.nativeLibraryDir
@@ -239,8 +246,6 @@ class PodroidQemu @Inject constructor(
                 _bootStage.value = "Mounting storage..."
             "overlay" in text ->
                 _bootStage.value = "Setting up overlay..."
-            "Mounting filesystems" in text ->
-                _bootStage.value = "Mounting filesystems..."
             "Loading kernel modules" in text ->
                 _bootStage.value = "Loading kernel modules..."
             "Configuring containers" in text ->
@@ -249,11 +254,11 @@ class PodroidQemu @Inject constructor(
                 _bootStage.value = "Waiting for network..."
             "Found" in text && "eth" in text ->
                 _bootStage.value = "Network found"
-            "Internet:" in text ->
-                _bootStage.value = "Checking internet..."
-            "Podroid" in text && "Alpine" in text ->
+            "Starting SSH" in text ->
+                _bootStage.value = "Starting SSH..."
+            "internet " in text || "Internet:" in text ->
                 _bootStage.value = "Almost ready..."
-            "Ready!" in text ->
+            "podman run" in text || "Ready!" in text ->
                 _bootStage.value = "Ready"
         }
     }
@@ -299,6 +304,8 @@ class PodroidQemu @Inject constructor(
         portForwards: List<PortForwardRule>,
         ramMb: Int,
         cpus: Int,
+        sshEnabled: Boolean = false,
+        androidIp: String = "unknown",
     ): List<String> {
         val args = mutableListOf<String>()
 
@@ -313,7 +320,12 @@ class PodroidQemu @Inject constructor(
 
         if (kernelPath.exists()) {
             args += "-kernel"; args += kernelPath.absolutePath
-            args += "-append"; args += "console=ttyAMA0 loglevel=1 quiet"
+            val cmdline = buildString {
+                append("console=ttyAMA0 loglevel=1 quiet")
+                append(" androidip=$androidIp")
+                if (sshEnabled) append(" ssh=1")
+            }
+            args += "-append"; args += cmdline
         } else {
             Log.w(TAG, "Kernel not found!")
         }
@@ -350,15 +362,27 @@ class PodroidQemu @Inject constructor(
 
     private fun ensureStorageImage() {
         val storageFile = File(context.filesDir, "storage.img")
-        if (!storageFile.exists()) {
-            try {
-                java.io.RandomAccessFile(storageFile, "rw").use { raf ->
-                    raf.setLength(2L * 1024 * 1024 * 1024)
-                }
-                Log.d(TAG, "Created storage.img")
-            } catch (e: Exception) {
-                Log.e(TAG, "Failed to create storage.img", e)
+        val gb = kotlinx.coroutines.runBlocking {
+            settingsRepository.getStorageSizeGbSnapshot().toLong()
+        }
+        val desiredBytes = gb * 1024L * 1024L * 1024L
+
+        if (storageFile.exists()) {
+            if (storageFile.length() == desiredBytes) {
+                Log.d(TAG, "storage.img already correct size (${gb}GB)")
+                return
             }
+            Log.d(TAG, "storage.img size mismatch (is ${storageFile.length() / (1024*1024*1024)}GB, want ${gb}GB) — recreating")
+            storageFile.delete()
+        }
+
+        try {
+            java.io.RandomAccessFile(storageFile, "rw").use { raf ->
+                raf.setLength(desiredBytes)
+            }
+            Log.d(TAG, "Created storage.img (${gb}GB)")
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to create storage.img", e)
         }
     }
 

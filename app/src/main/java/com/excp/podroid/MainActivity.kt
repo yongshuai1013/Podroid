@@ -1,9 +1,3 @@
-/*
- * Podroid - Rootless Podman for Android
- * Copyright (C) 2024 Podroid contributors
- *
- * Main activity for Podroid.
- */
 package com.excp.podroid
 
 import android.os.Bundle
@@ -28,9 +22,8 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         setContent {
             val darkTheme by settingsRepository.darkTheme.collectAsState(initial = true)
-
             PodroidTheme(darkTheme = darkTheme) {
-                PodroidNavGraph()
+                PodroidNavGraph(settingsRepository = settingsRepository)
             }
         }
     }

@@ -28,10 +28,13 @@ class SettingsRepository @Inject constructor(
 ) {
 
     companion object {
-        val KEY_DARK_THEME = booleanPreferencesKey("dark_theme")
-        val KEY_VM_RAM = intPreferencesKey("vm_ram_mb")
-        val KEY_VM_CPUS = intPreferencesKey("vm_cpus")
-        val KEY_FONT_SIZE = intPreferencesKey("terminal_font_size")
+        val KEY_DARK_THEME    = booleanPreferencesKey("dark_theme")
+        val KEY_VM_RAM        = intPreferencesKey("vm_ram_mb")
+        val KEY_VM_CPUS       = intPreferencesKey("vm_cpus")
+        val KEY_FONT_SIZE     = intPreferencesKey("terminal_font_size")
+        val KEY_STORAGE_GB    = intPreferencesKey("storage_gb")
+        val KEY_SETUP_DONE    = booleanPreferencesKey("setup_done")
+        val KEY_SSH_ENABLED   = booleanPreferencesKey("ssh_enabled")
     }
 
     val darkTheme: Flow<Boolean> = context.dataStore.data
@@ -46,6 +49,15 @@ class SettingsRepository @Inject constructor(
     val terminalFontSize: Flow<Int> = context.dataStore.data
         .map { it[KEY_FONT_SIZE] ?: 20 }
 
+    val storageSizeGb: Flow<Int> = context.dataStore.data
+        .map { it[KEY_STORAGE_GB] ?: 2 }
+
+    val isSetupDone: Flow<Boolean> = context.dataStore.data
+        .map { it[KEY_SETUP_DONE] ?: false }
+
+    val sshEnabled: Flow<Boolean> = context.dataStore.data
+        .map { it[KEY_SSH_ENABLED] ?: false }
+
     suspend fun setDarkTheme(value: Boolean) =
         context.dataStore.edit { it[KEY_DARK_THEME] = value }
 
@@ -58,9 +70,27 @@ class SettingsRepository @Inject constructor(
     suspend fun setTerminalFontSize(value: Int) =
         context.dataStore.edit { it[KEY_FONT_SIZE] = value }
 
+    suspend fun setStorageSizeGb(value: Int) =
+        context.dataStore.edit { it[KEY_STORAGE_GB] = value }
+
+    suspend fun markSetupDone() =
+        context.dataStore.edit { it[KEY_SETUP_DONE] = true }
+
+    suspend fun setSshEnabled(value: Boolean) =
+        context.dataStore.edit { it[KEY_SSH_ENABLED] = value }
+
+    suspend fun getSshEnabledSnapshot(): Boolean =
+        context.dataStore.data.map { it[KEY_SSH_ENABLED] ?: false }.first()
+
     suspend fun getVmRamMbSnapshot(): Int =
         context.dataStore.data.map { it[KEY_VM_RAM] ?: 512 }.first()
 
     suspend fun getVmCpusSnapshot(): Int =
         context.dataStore.data.map { it[KEY_VM_CPUS] ?: 1 }.first()
+
+    suspend fun getStorageSizeGbSnapshot(): Int =
+        context.dataStore.data.map { it[KEY_STORAGE_GB] ?: 2 }.first()
+
+    suspend fun isSetupDoneSnapshot(): Boolean =
+        context.dataStore.data.map { it[KEY_SETUP_DONE] ?: false }.first()
 }
