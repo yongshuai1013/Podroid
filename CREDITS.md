@@ -92,7 +92,7 @@ The application is written in **Kotlin**.
 
 Podroid itself is developed by **excp** and contributors.
 
-- **Repository:** https://github.com/excp/Podroid *(update with actual URL)*
+- **Repository:** https://github.com/ExTV/Podroid
 - **License:** GNU General Public License v2.0 (or later)
 
 If you have contributed to Podroid and are not listed here, please open an issue or pull
