@@ -170,6 +170,15 @@ class PodroidQemu @Inject constructor(
                 _state.value = VmState.Running
             }
 
+
+            scope.launch {
+                delay(60_000)
+                if (_bootStage.value != "Ready") {
+                    Log.w(TAG, "Boot stage fallback: ${_bootStage.value} → Ready (timeout)")
+                    _bootStage.value = "Ready"
+                }
+            }
+
             // Block until QEMU exits (keeps the calling service coroutine alive)
             val exitCode = proc.waitFor()
             Log.d(TAG, "QEMU exited: $exitCode")

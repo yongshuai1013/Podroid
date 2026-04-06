@@ -205,28 +205,10 @@ class TerminalViewModel @Inject constructor(
         terminalView = view
     }
 
-    /**
-     * Creates the TerminalSession backed by podroid-bridge.
-     *
-     * Steps:
-     * 1. Release PodroidQemu's boot-monitoring socket so bridge can connect.
-     * 2. Start the bridge binary as the session subprocess.
-     * 3. Termux allocates a real PTY; bridge relays PTY ↔ serial.sock.
-     *
-     * Resize flow (fully automatic after this):
-     *   TerminalView layout change → updateSize(cols, rows)
-     *   → TerminalSession.updateSize → ioctl TIOCSWINSZ on PTY master
-     *   → SIGWINCH to bridge → bridge writes RESIZE to ctrl.sock
-     *   → VM daemon → stty on ttyAMA0 → SIGWINCH in VM
-     */
     fun createSession() {
         if (attached) return
         attached = true
 
-        // Hand off the serial socket from boot monitoring to the bridge.
-        // shutdownInput() + close() tells the boot monitor to exit; the short
-        // sleep lets QEMU detect the disconnect and re-listen before the bridge
-        // tries to connect (QEMU serial only serves one client at a time).
         qemu.releaseSerial()
         Thread.sleep(500)
 
@@ -308,7 +290,6 @@ class TerminalViewModel @Inject constructor(
     override fun onCleared() {
         super.onCleared()
         terminalView = null
-        session = null
         attached = false
     }
 

@@ -51,9 +51,8 @@ class PodroidService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_START -> {
-                startForeground(NOTIFICATION_ID, buildNotification("Starting Podman..."))
+                startForeground(NOTIFICATION_ID, buildNotification("Starting VM..."))
                 acquireWakeLock()
-                startNotificationUpdates()
                 launchPodroid()
             }
             ACTION_STOP -> {
@@ -106,22 +105,40 @@ class PodroidService : Service() {
     private fun startNotificationUpdates() {
         notificationJob?.cancel()
         notificationJob = serviceScope.launch {
-            podroidQemu.bootStage
-                .collect { stage ->
+            launch {
+                podroidQemu.bootStage.collect { stage ->
                     val status = when {
                         stage == "Ready" || podroidQemu.state.value is VmState.Running && stage.isEmpty() ->
-                            "Podman is running"
+                            "VM is running"
                         stage.isNotEmpty() -> stage
-                        else -> "Starting Podman..."
+                        else -> "Starting VM..."
                     }
                     updateNotification(status)
                 }
+            }
+            launch {
+                podroidQemu.state.collect { state ->
+                    when (state) {
+                        is VmState.Stopped, is VmState.Idle -> {
+                            releaseWakeLock()
+                            if (android.os.Build.VERSION.SDK_INT >= 33) {
+                                stopForeground(STOP_FOREGROUND_REMOVE)
+                            } else {
+                                @Suppress("DEPRECATION") stopForeground(true)
+                            }
+                            stopSelf()
+                        }
+                        else -> {}
+                    }
+                }
+            }
         }
     }
 
     private fun launchPodroid() {
         launchJob?.cancel()
         launchJob = serviceScope.launch {
+            startNotificationUpdates()
             withContext(Dispatchers.IO) {
                 try {
                     val rules = portForwardRepository.getRulesSnapshot().toMutableList()
@@ -140,14 +157,6 @@ class PodroidService : Service() {
                     Log.e(TAG, "QEMU failed to start", e)
                 }
             }
-
-            releaseWakeLock()
-            if (android.os.Build.VERSION.SDK_INT >= 33) {
-                    stopForeground(STOP_FOREGROUND_REMOVE)
-                } else {
-                    @Suppress("DEPRECATION") stopForeground(true)
-                }
-            stopSelf()
         }
     }
 
