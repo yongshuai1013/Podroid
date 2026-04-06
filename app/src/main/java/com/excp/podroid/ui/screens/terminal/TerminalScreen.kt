@@ -331,7 +331,6 @@ private fun ExtraKeysRow(
     ) {
         ExtraKey("ESC", onKey)
         ExtraKey("TAB", onKey)
-        ExtraKey("SYNC", onKey)
         ExtraKey("CTRL", onKey, active = ctrlActive)
         ExtraKey("\u2190", onKey, sendKey = "LEFT")
         ExtraKey("\u2191", onKey, sendKey = "UP")
