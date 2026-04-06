@@ -1,37 +1,54 @@
 # Podroid
 
-**Run Linux containers on Android — no root required.**
+**Run Linux containers on your Android phone — no root required.**
 
-Podroid spins up a lightweight Alpine Linux VM on your phone using QEMU and gives you a fully working [Podman](https://podman.io) container runtime with a built-in serial terminal.
+Podroid spins up a lightweight Alpine Linux VM using QEMU and gives you a fully working [Podman](https://podman.io) container runtime with a built-in terminal. Install the APK, tap Start, and you're running containers in under a minute.
 
-<p>
-  <img src="screenshots/1.png" width="24%" />
-  <img src="screenshots/2.png" width="24%" />
-  <img src="screenshots/3.png" width="24%" />
-  <img src="screenshots/4.png" width="24%" />
-</p>
+---
 
-## Highlights
+## Features
 
-| | |
-|---|---|
-| **Containers** | Pull and run any OCI image — `podman run --rm -it alpine sh` |
-| **Terminal** | Full xterm emulation with Ctrl, Alt, F1-F12, arrows, and more |
-| **Persistence** | Packages, configs, and container images survive restarts |
-| **Networking** | Internet access out of the box, port forwarding to Android host |
-| **Self-contained** | No root, no Termux, no host binaries — just install the APK |
+### Container Runtime
+- **Podman** with crun, netavark, and slirp4netns — no root daemon, rootless by default
+- **Persistence** — packages, configs, and container images survive restarts via overlayfs
+- **Internet access** out of the box via QEMU SLIRP networking
+- `podman run --rm -it alpine sh` — works immediately after first boot
 
-## Requirements
+### Terminal
+- Full VT100/xterm emulation via [Termux](https://github.com/termux/termux-app)'s TerminalView
+- **Real PTY** — proper job control, signal handling, and escape sequences
+- **114 color themes** — Dracula, Nord, Solarized, Tokyo Night, Catppuccin, Gruvbox, and 108 more
+- **13 terminal fonts** — JetBrains Mono, Fira Code, Cascadia Code, Source Code Pro, Hack, and more
+- **Mouse support** — full CSI mouse tracking for TUI apps (btop, htop, mc, vim)
+- **Extra keys** — ESC, TAB, CTRL, ALT (sticky toggles), arrows, HOME, END, PGUP, PGDN, F1–F12, and common symbols
+- **Auto-resize** — TUI apps (vim, btop, nano) update dimensions on keyboard open/close
+- **Bell feedback** — haptic vibration on bell character
 
-- **arm64** Android device
-- Android **8.0+** (API 26)
-- ~150 MB free storage
+### Networking
+- **Port forwarding** — expose VM services to your Android device with one tap
+- **Protocol support** — TCP, UDP, or both
+- **Runtime control** — add and remove forwards while the VM is running via QMP
+- **Service presets** — one-tap setup for common services:
+  - Pi-hole (DNS + web), Nginx, Gitea, Grafana
+- **Built-in SSH** — connect from any SSH client on port 9922
+
+### Storage
+- **Configurable size** — 2, 4, 8, 16, 32, or 64 GB
+- **Downloads sharing** — mount your Android Downloads folder into the VM via virtio-9p
+
+### Performance
+- **ARM64-native** — runs as aarch64 on your device's CPU via QEMU TCG
+- **Multi-core** — configurable CPU count (1–N based on your device)
+- **Allocatable RAM** — 512 MB default, adjustable to your workload
+- **GICv3, MTTCG** — hardware acceleration for the emulated interrupt controller and multi-threaded TCG
+
+---
 
 ## Quick Start
 
 1. Install the APK from [Releases](https://github.com/ExTV/Podroid/releases)
 2. Open Podroid and tap **Start Podman**
-3. Wait for boot (~20 s) — progress is shown on screen and in the notification
+3. Wait ~20 seconds — boot progress shows in the notification
 4. Tap **Open Terminal**
 5. Run containers:
 
@@ -41,92 +58,68 @@ podman run --rm -it alpine sh
 podman run -d -p 8080:80 nginx
 ```
 
-## Terminal
-
-The terminal is powered by [Termux](https://github.com/termux/termux-app)'s `TerminalView` with full VT100/xterm emulation wired directly to the VM's serial console.
-
-**Extra keys bar** (scrollable):
-
-`ESC` `TAB` `SYNC` `CTRL` `ALT` `arrows` `HOME` `END` `PGUP` `PGDN` `F1–F12` `-` `/` `|`
-
-- **CTRL / ALT** are sticky toggles — tap once, then press a letter
-- **SYNC** manually pushes the terminal dimensions to the VM
-- Terminal size auto-syncs on keyboard open/close so TUI apps (vim, btop, htop) render correctly
-- Bell character triggers haptic feedback
-
-## Port Forwarding
-
-Forward ports from the VM to your Android device:
-
-1. Go to **Settings**
-2. Add a rule (e.g. TCP 8080 -> 80)
-3. Access the service at `localhost:8080` on your phone
-
-Rules persist across restarts and can be added or removed while the VM is running.
+---
 
 ## How It Works
 
 ```
 Android App
-├── Foreground Service (keeps VM alive)
-├── PodroidQemu
-│   ├── libqemu-system-aarch64.so  (QEMU TCG, no KVM)
-│   ├── Serial stdio ←→ TerminalEmulator
-│   └── QMP socket (port forwarding, VM control)
+├── Foreground Service          ← keeps the VM alive
+├── PodroidQemu engine
+│   ├── libqemu-system-aarch64  ← QEMU (TCG, no KVM)
+│   ├── podroid-bridge          ← PTY ↔ serial.sock relay
+│   └── QMP socket              ← port forwarding + VM control
 └── Alpine Linux VM
-    ├── initramfs (read-only base layer)
+    ├── initramfs (read-only base)
     ├── ext4 disk (persistent overlay)
-    ├── getty on ttyAMA0 (job control)
+    ├── Dropbear SSH (port 22)
     └── Podman + crun + netavark + slirp4netns
 ```
 
-**Boot sequence:** QEMU loads `vmlinuz-virt` + `initrd.img`. A two-phase init (`init-podroid`) mounts a persistent ext4 disk as an overlayfs upper layer over the initramfs. Packages you install and containers you pull are written to the overlay and survive reboots.
+**Boot:** QEMU loads a Linux kernel + initramfs. A two-phase init mounts a persistent ext4 disk as an overlayfs upper layer. Everything you install or pull persists across reboots.
 
-**Terminal wiring:** The app cannot fork host processes, so `TerminalSession` is wired to QEMU's serial I/O via reflection — keyboard input goes to QEMU stdin, QEMU stdout feeds the terminal emulator. Terminal dimensions are synced to the VM via `stty` so TUI apps see the correct size.
+**Terminal:** Termux allocates a real PTY for the terminal session. A native bridge binary relays data between the PTY and QEMU's serial socket. Mouse events and resize signals flow through the same path, so TUI apps work correctly.
 
-**Networking:** QEMU user-mode networking (SLIRP) puts the VM at `10.0.2.15`. Port forwarding uses QEMU's `hostfwd`, managed at startup via CLI args and at runtime via QMP.
+**Networking:** QEMU user-mode networking (SLIRP) gives the VM `10.0.2.15`. Port forwards are managed via QEMU's `-netdev hostfwd` at startup and QMP at runtime.
+
+---
 
 ## Building from Source
 
-### 1. Build the initramfs
-
-Requires Docker with multi-arch support:
+Requires Docker with multi-arch support and Android SDK.
 
 ```sh
+# Build the VM initramfs and kernel (requires Docker)
 ./docker-build-initramfs.sh
-```
 
-### 2. Build the APK
+# Build QEMU and the terminal bridge binary (requires Docker)
+./build-qemu-android.sh
 
-```sh
+# Build the APK
 ./gradlew assembleDebug
-adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```
 
-## Project Layout
+Install: `adb install -r app/build/outputs/apk/debug/app-debug.apk`
 
-```
-Dockerfile                  # Multi-stage initramfs builder (Alpine aarch64)
-docker-build-initramfs.sh   # One-command build script
-init-podroid                # Custom /init for the VM
+---
 
-app/src/main/
-├── java/com/excp/podroid/
-│   ├── engine/             # QEMU lifecycle, QMP client, VM state machine
-│   ├── service/            # Foreground service with boot-stage notifications
-│   ├── data/repository/    # Settings + port forward persistence
-│   └── ui/screens/         # Home, Terminal, Settings (Jetpack Compose)
-├── jniLibs/arm64-v8a/      # Pre-built QEMU + libslirp
-└── assets/                 # Kernel + initramfs (generated)
-```
+## Requirements
+
+- **arm64** Android device (most phones from 2018 onward)
+- Android **8.0+** (API 26)
+- ~150 MB storage for the app, plus your chosen VM disk size
+
+---
 
 ## Credits
 
 - [QEMU](https://www.qemu.org) — machine emulation
 - [Alpine Linux](https://alpinelinux.org) — VM base
 - [Podman](https://podman.io) — container runtime
-- [Termux](https://github.com/termux/termux-app) — terminal emulator libraries
-- [Limbo PC Emulator](https://github.com/limboemu/limbo) — pioneered QEMU on Android
+- [Termux](https://github.com/termux/termux-app) — terminal emulator
+- [Limbo PC Emulator](https://github.com/limboemu/limbo) — QEMU on Android groundwork
+
+---
 
 ## License
 
