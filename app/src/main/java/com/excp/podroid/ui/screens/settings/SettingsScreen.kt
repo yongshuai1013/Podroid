@@ -166,6 +166,7 @@ fun SettingsScreen(
             ) {
                 FilledTonalButton(
                     onClick = { showColorThemeDialog = true },
+                    enabled = vmNotRunning,
                     modifier = Modifier.weight(1f),
                 ) {
                     Icon(Icons.Default.Palette, contentDescription = null, modifier = Modifier.padding(end = 4.dp))
@@ -176,6 +177,7 @@ fun SettingsScreen(
                 }
                 FilledTonalButton(
                     onClick = { showFontDialog = true },
+                    enabled = vmNotRunning,
                     modifier = Modifier.weight(1f),
                 ) {
                     Icon(Icons.Default.TextFields, contentDescription = null, modifier = Modifier.padding(end = 4.dp))
