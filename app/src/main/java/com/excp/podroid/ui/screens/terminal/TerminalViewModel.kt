@@ -267,18 +267,8 @@ class TerminalViewModel @Inject constructor(
         session?.updateSize(cols, rows)
     }
 
-    /**
-     * SYNC button — re-sends the current size through the full chain.
-     * Useful if the VM missed a resize event (e.g., during intensive I/O).
-     */
-    fun syncSize() {
-        val emu = session?.emulator ?: return
-        session?.updateSize(emu.mColumns, emu.mRows)
-    }
-
     fun sendExtraKey(key: String) {
         when (key) {
-            "SYNC" -> { syncSize(); return }
             "CTRL" -> { extraCtrl = !extraCtrl; return }
             "ALT"  -> { extraAlt = !extraAlt; return }
         }

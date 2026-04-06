@@ -47,7 +47,7 @@ Podroid spins up a lightweight Alpine Linux VM using QEMU and gives you a fully 
 ## Quick Start
 
 1. Install the APK from [Releases](https://github.com/ExTV/Podroid/releases)
-2. Open Podroid and tap **Start Podman**
+2. Open Podroid and tap **Start VM**
 3. Wait ~20 seconds — boot progress shows in the notification
 4. Tap **Open Terminal**
 5. Run containers:
