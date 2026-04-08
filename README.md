@@ -111,6 +111,34 @@ Install: `adb install -r app/build/outputs/apk/debug/app-debug.apk`
 
 ---
 
+## AI/LLM Integration
+
+Podroid includes a comprehensive `skill.md` file that provides AI assistants with complete project context. This enables AI tools like Claude, OpenCode, or any LLM to work on Podroid without needing to learn the codebase structure.
+
+### Using with AI Assistants
+
+**For OpenCode users:**
+```
+/load_skill path/to/skill.md
+```
+
+**For Claude/Cline users:**
+```
+Read the skill.md file at: /path/to/Podroid/skill.md
+```
+
+The skill file includes:
+- Complete architecture overview
+- All source file locations and purposes
+- Build commands and workflows
+- Known issues and quirks
+- DataStore keys and settings
+- VM boot sequence and networking
+
+This makes it easy to delegate development tasks to AI assistants while maintaining full context.
+
+---
+
 ## Credits
 
 - [QEMU](https://www.qemu.org) — machine emulation
