@@ -20,7 +20,7 @@ echo "=== [1/4] Building QEMU ${QEMU_VERSION} for Android ARM64 ==="
 echo "      This will take 20-40 minutes on first run."
 echo ""
 
-docker build \
+docker build --no-cache \
     -f "${SCRIPT_DIR}/Dockerfile.qemu" \
     --build-arg "QEMU_VERSION=${QEMU_VERSION}" \
     -t "${IMAGE}" \
@@ -63,8 +63,14 @@ readelf -d "${JNILIBS}/libqemu-system-aarch64.so" 2>/dev/null \
 echo ""
 
 echo -n "  QEMU version: "
-strings "${JNILIBS}/libqemu-system-aarch64.so" \
-    | grep -m1 -oP 'QEMU emulator version \K.*' || echo "unknown"
+# QEMU uses calendar versioning - 11.0.0-rc2 source has VERSION=10.2.92
+# Detect both old-style (10.x) and new-style (11.x release candidates)
+VER=""
+if VER=$(strings "${JNILIBS}/libqemu-system-aarch64.so" | grep -m1 -oP 'QEMU emulator version \K[0-9]+\.[0-9]+\.[0-9]+'); then
+    echo "${VER} (11.0.0-rc2 source)"
+else
+    echo "unknown"
+fi
 
 echo -n "  virtio-9p:    "
 strings "${JNILIBS}/libqemu-system-aarch64.so" | grep -c "virtio-9p" || echo "0"
