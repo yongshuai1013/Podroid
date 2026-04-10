@@ -1,6 +1,6 @@
 # Podroid AI Context
 
-> **Last updated:** 2026-04-08
+> **Last updated:** 2026-04-10
 > **Purpose:** Complete project context for AI-assisted development without re-explaining structure every prompt.
 
 ---
@@ -614,3 +614,34 @@ cannot locate symbol "copy_file_range" referenced by libqemu-system-aarch64.so
 - [ ] **Terminal title → TopAppBar** — `onTitleChanged()` in `TerminalSessionClient` is a no-op. Could update the app bar title when the shell sets the terminal title via OSC sequences.
 - [ ] **APK size reduction** — Currently ~29MB of fonts and full QEMU. Options: deferred font download, split APK, font subsetting, strip debug symbols.
 - [ ] **Custom font loading** — Issue #5 (Allow loading custom fonts). Allow users to load their own `.ttf`/`.otf` fonts in addition to the built-in collection.
+
+---
+
+## Recent Fixes (2026-04-08 to 2026-04-10)
+
+### v1.1.2: Wakelock race, Android 14+ crash, restart race, socket cleanup, diagnostic log
+
+**Files changed:** `PodroidService.kt`, `PodroidQemu.kt`, `HomeViewModel.kt`, `SettingsScreen.kt`, `SettingsViewModel.kt`
+
+**Fixes:**
+- **PodroidService:** Fix StateFlow replay releasing wakelock immediately by adding `seenActive` guard; add `VmState.Error` to cleanup; use `ServiceCompat.startForeground` with `FOREGROUND_SERVICE_TYPE_SPECIAL_USE` for Android 14+
+- **PodroidQemu:** Remove unnecessary `Thread.sleep(500)`; add `qmp.sock` to stale socket cleanup; change socket timeout to throw exception instead of silently proceeding
+- **HomeViewModel:** Replace `delay(2000)` with await terminal state via `first()` for reliable restart
+- **SettingsViewModel:** Rewrite `exportConsoleLogs` to create comprehensive `log.txt` with app info, device, settings, VM state, port forwards, logcat, and QEMU console
+- **SettingsScreen:** Update UI label and add explanatory subtitle
+
+### Fix: Storage slider and terminal theme/font persistence
+
+**Files changed:** `NavGraph.kt`, `SettingsScreen.kt`, `SetupScreen.kt`, `TerminalViewModel.kt`
+
+**Fixes:**
+- **SetupScreen:** Fix slider steps to show 6 discrete storage values (2-64GB)
+- **SettingsScreen:** Add callback to invalidate terminal view when theme/font changes
+- **TerminalViewModel:** Add `terminalColorTheme`/`terminalFont` StateFlows and `invalidateTerminalView()`
+- **NavGraph:** Pass theme/font change callback to SettingsScreen
+
+### Fix: Duplicate PNG launcher icons
+
+**Files changed:** `app/src/main/res/`
+
+**Fix:** Remove duplicate PNG launcher icons causing build failures
