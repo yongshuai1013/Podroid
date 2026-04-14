@@ -29,6 +29,7 @@ FROM --platform=linux/arm64/v8 alpine:3.23 AS rootfs-builder
 # Install all packages needed in the VM
 RUN apk update && apk add --no-cache \
     linux-virt \
+    bash \
     busybox \
     busybox-extras \
     ttyd \
