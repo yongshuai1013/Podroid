@@ -1,22 +1,39 @@
-#!/bin/sh
+#!/bin/bash
 # Podroid init — persistent Alpine Linux VM with Podman
 # Two-phase: Phase 1 mounts the overlay, Phase 2 runs the main system.
 
-# ── Phase 2: Main init (running inside persistent overlay) ──────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+# Phase 2: Main init (running inside persistent overlay)
+# ══════════════════════════════════════════════════════════════════════════════
 if [ "$1" = "--main" ]; then
 
-# ── Core filesystems ────────────────────────────────────────────────────────
-mount -t proc proc /proc -o noexec,nosuid,nodev
-mount -t sysfs sys /sys -o noexec,nosuid,nodev
-mount -t devtmpfs devtmpfs /dev -o exec,nosuid,mode=0755,size=2M 2>/dev/null || \
-    mount -t tmpfs tmpfs /dev -o exec,nosuid,mode=0755,size=2M
-mkdir -p /dev/pts /dev/shm /dev/mqueue /dev/net
-mount -t devpts devpts /dev/pts -o gid=5,mode=0620,noexec,nosuid 2>/dev/null
-mount -t tmpfs tmpfs /dev/shm  -o noexec,nosuid,nodev,size=64m
-mount -t tmpfs tmpfs /tmp      -o noexec,nosuid,nodev
-mount -t tmpfs tmpfs /run      -o noexec,nosuid,nodev,mode=0755
+# ── Init logging (silent unless error) ───────────────────────────────────────
+_LOG=/tmp/init-early.log
+log() { printf "%s %s\n" "$(date '+%H:%M:%S' 2>/dev/null)" "$*" >> "$_LOG" 2>/dev/null; }
+log_error() { printf "[init] ERROR: %s\n" "$*"; log "ERROR: $*"; }
 
-# ── cgroup2 ─────────────────────────────────────────────────────────────────
+# ── Core filesystems ───────────────────────────────────────────────────────────
+mount -t proc proc /proc -o noexec,nosuid,nodev 2>/dev/null
+mount -t sysfs sys /sys -o noexec,nosuid,nodev 2>/dev/null
+mount -t devtmpfs devtmpfs /dev -o exec,nosuid,mode=0755,size=2M 2>/dev/null || \
+    mount -t tmpfs tmpfs /dev -o exec,nosuid,mode=0755,size=2M 2>/dev/null
+mkdir -p /dev/pts /dev/shm /dev/mqueue /dev/net 2>/dev/null
+
+# devpts with newinstance - REQUIRED for PTY in containers
+mount -t devpts devpts /dev/pts \
+    -o gid=5,mode=0620,ptmxmode=0666,newinstance,noexec,nosuid 2>/dev/null || \
+    log_error "Failed to mount devpts"
+
+# Create ptmx as real char device (not symlink) - REQUIRED for crun
+rm -f /dev/ptmx 2>/dev/null
+mknod /dev/ptmx c 5 2 2>/dev/null || log_error "Failed to create /dev/ptmx"
+chmod 0666 /dev/ptmx /dev/pts/ptmx 2>/dev/null
+
+mount -t tmpfs tmpfs /dev/shm  -o noexec,nosuid,nodev,size=64m 2>/dev/null
+mount -t tmpfs tmpfs /tmp      -o noexec,nosuid,nodev 2>/dev/null
+mount -t tmpfs tmpfs /run      -o noexec,nosuid,nodev,mode=0755 2>/dev/null
+
+# ── cgroup2 (REQUIRED for Podman on Alpine) ─────────────────────────────────
 mkdir -p /sys/fs/cgroup
 mount -t cgroup2 cgroup2 /sys/fs/cgroup 2>/dev/null
 if [ -f /sys/fs/cgroup/cgroup.subtree_control ]; then
@@ -25,32 +42,47 @@ if [ -f /sys/fs/cgroup/cgroup.subtree_control ]; then
     done
 fi
 
-# ── Busybox + dirs ──────────────────────────────────────────────────────────
+# ── Busybox + dirs ────────────────────────────────────────────────────────────
 /bin/busybox --install -s 2>/dev/null
+
+# Make sh point to bash (Alpine uses sh by default)
+ln -sf /bin/bash /bin/sh 2>/dev/null
+
 mkdir -p /var/lib/containers/storage /var/log /var/tmp /root
-mkdir -p /run/lock /run/containers/storage /run/libpod
+mkdir -p /run/lock /run/containers/storage /run/libpod /run/crun
+mkdir -p /usr/local/bin /usr/local/sbin 2>/dev/null
 chmod 700 /root
 chmod 1777 /tmp /var/tmp
+cp "$_LOG" /var/log/init.log 2>/dev/null && _LOG=/var/log/init.log
 
-# ── Hostname ─────────────────────────────────────────────────────────────────
-echo "podroid" > /etc/hostname
-hostname podroid
+# ── Hostname + hosts ─────────────────────────────────────────────────────────
+echo "podroid" > /etc/hostname 2>/dev/null
+hostname podroid 2>/dev/null
+cat > /etc/hosts <<'HOSTS'
+127.0.0.1   localhost podroid
+::1         localhost ip6-localhost ip6-loopback
+HOSTS
 
-# ── Kernel modules ───────────────────────────────────────────────────────────
-echo "[init] Loading kernel modules..."
+# ── Kernel modules (silent) ─────────────────────────────────────────────────
 KVER=$(uname -r)
 if [ -d "/lib/modules/$KVER" ]; then
     depmod -a 2>/dev/null
-    for mod in virtio_net virtio_blk fuse tun veth bridge br_netfilter overlay \
-               xt_addrtype xt_conntrack xt_nat nf_nat nf_conntrack ip_tables \
-               9p 9pnet 9pnet_virtio; do
-        modprobe $mod 2>/dev/null
+    for mod in \
+        virtio_net virtio_blk fuse tun veth \
+        bridge br_netfilter overlay \
+        xt_addrtype xt_conntrack xt_nat xt_mark xt_comment \
+        nf_nat nf_conntrack nf_conntrack_netlink nfnetlink \
+        ip_tables ip6_tables ip6table_nat \
+        9p 9pnet 9pnet_virtio; do
+        modprobe "$mod" 2>/dev/null
     done
 fi
+# Ensure required device nodes exist
 [ ! -c /dev/net/tun ] && mknod /dev/net/tun c 10 200 2>/dev/null
+[ ! -c /dev/fuse    ] && mknod /dev/fuse   c 10 229 2>/dev/null
 
 # ── Read kernel cmdline params ───────────────────────────────────────────────
-ANDROID_IP="unknown"
+ANDROID_IP=""
 SSH_ENABLED=0
 for param in $(cat /proc/cmdline); do
     case "$param" in
@@ -59,8 +91,8 @@ for param in $(cat /proc/cmdline); do
     esac
 done
 
-# ── Networking ───────────────────────────────────────────────────────────────
-echo "[init] Waiting for network..."
+# ── Networking (silent) ────────────────────────────────────────────────────
+ip link set lo up 2>/dev/null
 NETIF=""
 for i in $(seq 1 30); do
     NETIF=$(ip -o link show 2>/dev/null | awk -F': ' '{print $2}' | grep -v lo | head -1)
@@ -69,31 +101,24 @@ for i in $(seq 1 30); do
 done
 
 if [ -n "$NETIF" ]; then
-    echo "[init] Found: $NETIF"
-    ip link set dev "$NETIF" up
+    ip link set dev "$NETIF" up 2>/dev/null
     ip addr add 10.0.2.15/24 dev "$NETIF" 2>/dev/null
     ip route add default via 10.0.2.2 dev "$NETIF" 2>/dev/null
-else
-    echo "[init] WARNING: No network interface found!"
 fi
 
-echo "nameserver 10.0.2.3" > /etc/resolv.conf
-echo "nameserver 8.8.8.8"  >> /etc/resolv.conf
-echo "nameserver 1.1.1.1"  >> /etc/resolv.conf
+cat > /etc/resolv.conf <<'DNS'
+nameserver 10.0.2.3
+nameserver 8.8.8.8
+nameserver 1.1.1.1
+DNS
 
-# ── Downloads folder ─────────────────────────────────────────────────────────
-# msize=1048576: 1MB message size instead of the default 8KB — reduces round-trips
-#   128x for large files (400MB = 400 trips instead of 51200)
-# cache=loose: guest page-caches data already read; reads the same file twice
-#   without going back to the host
-# noatime: skip access time writes on every read
+# ── Downloads folder (9p) ─────────────────────────────────────────────────────
 mkdir -p /mnt/downloads
-if mount -t 9p -o trans=virtio,version=9p2000.L,rw,msize=1048576,cache=loose,noatime downloads /mnt/downloads 2>/dev/null; then
-    echo "[init] Downloads folder mounted at /mnt/downloads"
-fi
+mount -t 9p \
+    -o trans=virtio,version=9p2000.L,rw,msize=1048576,cache=loose,noatime \
+    downloads /mnt/downloads 2>/dev/null
 
-# ── Container config ─────────────────────────────────────────────────────────
-echo "[init] Configuring containers..."
+# ── Container sysctls (Alpine/Podman best practices) ────────────────────────
 sysctl -qw net.ipv4.ip_forward=1 2>/dev/null
 sysctl -qw net.ipv4.conf.all.forwarding=1 2>/dev/null
 sysctl -qw net.bridge.bridge-nf-call-iptables=1 2>/dev/null
@@ -102,21 +127,23 @@ sysctl -qw net.ipv4.ping_group_range="0 2147483647" 2>/dev/null
 sysctl -qw kernel.unprivileged_userns_clone=1 2>/dev/null
 sysctl -qw fs.inotify.max_user_instances=256 2>/dev/null
 sysctl -qw fs.inotify.max_user_watches=65536 2>/dev/null
+sysctl -qw net.core.rmem_max=26214400 2>/dev/null
+sysctl -qw net.core.wmem_max=26214400 2>/dev/null
 
+# ── Podman configuration (Alpine official recommendations) ─────────────────
 [ -f /etc/subuid ] || echo "root:100000:65536" > /etc/subuid
 [ -f /etc/subgid ] || echo "root:100000:65536" > /etc/subgid
 
-if [ ! -f /etc/containers/containers.conf ]; then
-    mkdir -p /etc/containers
-    cat > /etc/containers/containers.conf <<'CONF'
+# containers.conf - minimal, based on Alpine Wiki
+rm -f /etc/containers/containers.conf 2>/dev/null
+
+mkdir -p /etc/containers
+cat > /etc/containers/containers.conf <<'CONF'
 [containers]
 cgroups = "enabled"
-default_sysctls = []
-userns = "host"
 
 [engine]
 runtime = "crun"
-no_pivot_root = true
 network_cmd = "/usr/bin/slirp4netns"
 events_logger = "file"
 
@@ -124,7 +151,9 @@ events_logger = "file"
 network_backend = "netavark"
 CONF
 
-    cat > /etc/containers/storage.conf <<'CONF'
+# storage.conf
+mkdir -p /etc/containers
+cat > /etc/containers/storage.conf <<'CONF'
 [storage]
 driver = "overlay"
 runroot = "/run/containers/storage"
@@ -134,23 +163,18 @@ graphroot = "/var/lib/containers/storage"
 mount_program = "/usr/bin/fuse-overlayfs"
 CONF
 
-    cat > /etc/containers/registries.conf <<'CONF'
+# registries.conf
+mkdir -p /etc/containers
+cat > /etc/containers/registries.conf <<'CONF'
 unqualified-search-registries = ["docker.io", "quay.io"]
 CONF
-fi
 
-if [ ! -f /etc/crun/crun.conf ]; then
-    mkdir -p /etc/crun
-    cat > /etc/crun/crun.conf <<'CONF'
-[global]
-no-pivot = true
-CONF
-fi
+# crun.conf (empty)
+mkdir -p /etc/crun
+[ -f /etc/crun/crun.conf ] || touch /etc/crun/crun.conf
 
-# ── SSH setup (Dropbear) ─────────────────────────────────────────────────────
+# ── SSH setup (Dropbear) - Suppress all output ─────────────────────────────
 if [ "$SSH_ENABLED" = "1" ]; then
-    echo "[init] Starting SSH server (Dropbear)..."
-
     if [ ! -f /etc/podroid-ssh-init ]; then
         echo "root:podroid" | chpasswd 2>/dev/null
         touch /etc/podroid-ssh-init
@@ -163,15 +187,10 @@ if [ "$SSH_ENABLED" = "1" ]; then
 
     mkdir -p /root/.ssh
     chmod 700 /root/.ssh
-
-    if dropbear -p 22; then
-        echo "[init] SSH server started on port 22 (host port 9922)"
-    else
-        echo "[init] WARNING: SSH server failed to start"
-    fi
+    dropbear -p 22 >/dev/null 2>&1
 fi
 
-# ── Environment ──────────────────────────────────────────────────────────────
+# ── Environment ────────────────────────────────────────────────────────────────
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 export HOME=/root
 export TERM=xterm-256color
@@ -189,51 +208,64 @@ stty rows 24 cols 80 -ixon -ixoff -iexten 2>/dev/null
 
 # ── Shutdown handler ─────────────────────────────────────────────────────────
 shutdown_handler() {
-    echo ""
-    echo "[init] Shutting down..."
-    sync
     podman stop -a -t 5 2>/dev/null
+    podman network prune -f 2>/dev/null
     sync
-    echo "[init] Goodbye."
 }
 trap shutdown_handler TERM INT HUP
 
-# ── Internet check ───────────────────────────────────────────────────────────
-INTERNET="no"
-if wget -q -O /dev/null --timeout=5 http://dl-cdn.alpinelinux.org/alpine/MIRRORS.txt 2>/dev/null; then
-    INTERNET="yes"
+# ── Gather system info for MOTD ──────────────────────────────────────────────
+VM_IP=$(ip addr show "$NETIF" 2>/dev/null | grep 'inet ' | awk '{print $2}' | cut -d'/' -f1)
+STORAGE_USED=$(df -BG / 2>/dev/null | awk 'NR==2 {gsub(/G/,"",$3); print $3}')
+STORAGE_TOTAL=$(df -BG / 2>/dev/null | awk 'NR==2 {gsub(/G/,"",$2); print $2}')
+MEM_MB=$(free -m 2>/dev/null | awk '/^Mem:/{print $2}')
+MEM_AVAIL=$(free -m 2>/dev/null | awk '/^Mem:/{print $7}')
+CPUS=$(nproc 2>/dev/null || echo "?")
+KVER_SHORT=$(uname -r | cut -d- -f1)
+UPTIME_SEC=$(cat /proc/uptime 2>/dev/null | cut -d' ' -f1 | cut -d'.' -f1)
+UPTIME_MIN=$((UPTIME_SEC / 60))
+
+# Check internet
+INTERNET="✗"
+if wget -q -O /dev/null --timeout=3 http://dl-cdn.alpinelinux.org/alpine/MIRRORS.txt 2>/dev/null; then
+    INTERNET="✓"
 fi
 
-# ── MOTD ─────────────────────────────────────────────────────────────────────
-VM_IP=$(ip addr show "$NETIF" 2>/dev/null | grep 'inet ' | awk '{print $2}' | cut -d'/' -f1)
-STORAGE_GB=$(df -BG / 2>/dev/null | awk 'NR==2 {gsub(/G/,"",$2); print $2}')
-
-SSH_LINE=""
-if [ "$SSH_ENABLED" = "1" ]; then
-    SSH_LINE="  ssh root@${ANDROID_IP} -p 9922  (pass: podroid)"
+# ── Enhanced MOTD ───────────────────────────────────────────────────────────
+if [ "$SSH_ENABLED" = "1" ] && [ -n "$ANDROID_IP" ]; then
+    SSH_INFO="
+┌────────────────────────────────────────────────────────────┐
+│  SSH Access                                                │
+│  ssh root@${ANDROID_IP} -p 9922                            │
+│  Password: podroid                                         │
+└────────────────────────────────────────────────────────────┘"
+else
+    SSH_INFO=""
 fi
 
 cat > /etc/motd <<MOTD
 
-  ____          _              _     _
- |  _ \ ___  __| |_ __ ___ (_) __| |
- | |_) / _ \/ _\` | '__/ _ \| |/ _\` |
- |  __/ (_) | (_| | | | (_) | | (_| |
- |_|   \___/ \__,_|_|  \___/|_|\__,_|
+ ╔══════════════════════════════════════════════════════════╗
+ ║  Podroid - Alpine Linux Container Runtime                ║
+ ╚══════════════════════════════════════════════════════════╝
 
-  Alpine 3.23  ·  Podman  ·  QEMU
+ 📦 System
+    Alpine: ${KVER_SHORT}    CPU: ${CPUS} cores    Memory: ${MEM_AVAIL}/${MEM_MB} MB
+    Disk: ${STORAGE_USED}/${STORAGE_TOTAL} GB    Net: ${INTERNET}    Uptime: ${UPTIME_MIN}m
 
-  ip ${VM_IP:-10.0.2.15}  ·  internet ${INTERNET}  ·  storage ${STORAGE_GB:-?} GB
-${SSH_LINE}
+ 🐳 Quick Start
+    podman run -it alpine sh              # Interactive shell
+    podman run -d -p 8080:80 nginx        # Run nginx
+    podman ps -a                          # List containers
 
-  podman run --rm -it alpine sh
-  podman run -d -p 8080:80 nginx
+${SSH_INFO}
 
 MOTD
 
 # ── Profile ───────────────────────────────────────────────────────────────────
 cat > /etc/profile <<'PROF'
 export HOME=/root
+export SHELL=/bin/bash
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 export TERM=xterm-256color
 export LANG=C.UTF-8
@@ -243,22 +275,34 @@ export PODMAN_IGNORE_CGROUPSV1_WARNING=1
 export CONTAINERS_CONF=/etc/containers/containers.conf
 export CONTAINERS_STORAGE_CONF=/etc/containers/storage.conf
 export CONTAINERS_REGISTRIES_CONF=/etc/containers/registries.conf
+
 stty -ixon -ixoff -iexten -echoctl 2>/dev/null
-# Disable checkwinsize so ash never queries cursor position (CSI 6n / DSR 6n).
-# Responses to these queries were previously filtered by podroid-bridge, which
-# broke nvim's TUI initialization. With filtering removed, ash still sends the
-# queries but no longer matters — however disabling checkwinsize entirely avoids
-# the one-time "ESC[row;colR" garbage from appearing on the first prompt.
 set +o checkwinsize 2>/dev/null
-cd /root
+
+alias ls='ls --color=auto'
+alias ll='ls -lah --color=auto'
+alias la='ls -A --color=auto'
+alias grep='grep --color=auto'
+alias df='df -h'
+alias free='free -m'
+alias ip='ip -c'
+alias less='less -R'
+alias dps='podman ps -a'
+alias di='podman images'
+alias dlogs='podman logs -f'
+alias dexec='podman exec -it'
+alias drun='podman run --rm -it'
+alias dstop='podman stop'
+alias drm='podman rm'
+alias drmi='podman rmi'
+alias dstats='podman stats'
+
+PS1='\[\e[1;32m\]➜\[\e[0m\] \[\e[1;34m\]\w\[\e[0m\] \[\e[1;31m\]#\[\e[0m\] '
+
+cd /root 2>/dev/null
 PROF
 
-# ── Resize control daemon ─────────────────────────────────────────────────────
-# Reads "RESIZE rows cols\n" from /dev/hvc0 (virtio-console, mapped from
-# ctrl.sock on the Android side by podroid-bridge on SIGWINCH).
-# stty on /dev/ttyAMA0 calls TIOCSWINSZ; the Linux kernel automatically
-# sends SIGWINCH to the foreground process group — nvim/htop/btop resize
-# correctly without any stdin injection.
+# ── Resize control daemon ────────────────────────────────────────────────────
 (
     for i in $(seq 1 30); do
         [ -c /dev/hvc0 ] && break
@@ -275,16 +319,19 @@ PROF
     done < /dev/hvc0
 ) &
 
-# ── Login wrapper ─────────────────────────────────────────────────────────────
+# ── Login wrapper ────────────────────────────────────────────────────────────
+mkdir -p /usr/local/bin
+
 cat > /usr/local/bin/podroid-login <<'LOGIN'
-#!/bin/sh
-. /etc/profile
+#!/bin/bash
+export SHELL=/bin/bash
 cat /etc/motd
-exec /bin/sh
+exec /bin/bash --login
 LOGIN
 chmod +x /usr/local/bin/podroid-login
 
-grep -q '^root:' /etc/passwd 2>/dev/null || echo "root:x:0:0:root:/root:/bin/sh" > /etc/passwd
+grep -q '^root:' /etc/passwd 2>/dev/null || \
+    echo "root:x:0:0:root:/root:/bin/bash" > /etc/passwd
 
 while true; do
     /sbin/getty -n -l /usr/local/bin/podroid-login 0 ttyAMA0 xterm-256color
@@ -294,12 +341,13 @@ fi
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Phase 1: Early init — mount persistent storage and pivot to overlay
+# Uses chroot (with proper devpts setup for PTY support)
 # ══════════════════════════════════════════════════════════════════════════════
 
-mount -t proc proc /proc -o noexec,nosuid,nodev
-mount -t sysfs sys /sys -o noexec,nosuid,nodev
+mount -t proc proc /proc -o noexec,nosuid,nodev 2>/dev/null
+mount -t sysfs sys /sys -o noexec,nosuid,nodev 2>/dev/null
 mount -t devtmpfs devtmpfs /dev -o exec,nosuid,mode=0755,size=2M 2>/dev/null || \
-    mount -t tmpfs tmpfs /dev -o exec,nosuid,mode=0755,size=2M
+    mount -t tmpfs tmpfs /dev -o exec,nosuid,mode=0755,size=2M 2>/dev/null
 
 KVER=$(uname -r)
 if [ -d "/lib/modules/$KVER" ]; then
@@ -309,6 +357,12 @@ fi
 
 echo 1 > /proc/sys/kernel/printk 2>/dev/null
 
+echo "  ╔═══════════════════════════════════════════╗"
+echo "  ║   Podroid VM is starting...             ║"
+echo "  ║   Please wait...                        ║"
+echo "  ╚═══════════════════════════════════════════╝"
+echo ""
+
 mkdir -p /mnt/persist
 PERSIST_DEV=""
 for dev in /dev/vda /dev/vdb; do
@@ -317,13 +371,11 @@ for dev in /dev/vda /dev/vdb; do
     break
 done
 
-OVERLAY_OK=false
 if [ -n "$PERSIST_DEV" ]; then
     if ! mount -t ext4 -o rw,noatime "$PERSIST_DEV" /mnt/persist 2>/dev/null; then
         /bin/busybox --install -s 2>/dev/null
         e2fsck -y "$PERSIST_DEV" >/dev/null 2>&1
         if ! mount -t ext4 -o rw,noatime "$PERSIST_DEV" /mnt/persist 2>/dev/null; then
-            echo "[init] Formatting $PERSIST_DEV for persistent storage..."
             mkfs.ext4 -q -F "$PERSIST_DEV" >/dev/null 2>&1
             mount -t ext4 -o rw,noatime "$PERSIST_DEV" /mnt/persist 2>/dev/null
         fi
@@ -340,18 +392,17 @@ if [ -n "$PERSIST_DEV" ]; then
             mkdir -p /mnt/overlay/mnt/persist
             mount --bind /mnt/persist /mnt/overlay/mnt/persist
             touch /mnt/persist/.overlay-active
+            
+            # Use chroot (works when devpts is properly set up before)
             umount /dev 2>/dev/null
             umount /sys 2>/dev/null
             umount /proc 2>/dev/null
             exec chroot /mnt/overlay /init --main
-        else
-            echo "[init] WARNING: Overlay mount failed! Running without persistence."
         fi
     fi
 fi
 
-echo "[init] WARNING: No persistent storage — changes will be lost on reboot!"
 umount /dev 2>/dev/null
 umount /sys 2>/dev/null
 umount /proc 2>/dev/null
-exec /init --main
+exec chroot /mnt/overlay /init --main
