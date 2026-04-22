@@ -135,6 +135,13 @@ class PodroidService : Service() {
                 }
             }
             launch {
+                podroidQemu.bootStage.collect { stage ->
+                    if (podroidQemu.state.value is VmState.Starting && stage.isNotEmpty()) {
+                        updateNotification(stage)
+                    }
+                }
+            }
+            launch {
                 // Terminal states: release resources and shut down the service.
                 // Error must be included here — otherwise a failed boot leaves the
                 // wakelock held and the foreground notification stuck on "Starting...".
