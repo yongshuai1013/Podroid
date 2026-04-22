@@ -1,95 +1,128 @@
-# Podroid initramfs builder
-# Stage 1: Download Alpine aarch64 ISO + netboot on x86_64
+# ─────────────────────────────────────────────────────────────────────────────
+# Podroid Unified Dockerfile
+# Combines Initramfs (Alpine VM) and QEMU (Android ARM64) build stages.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ==============================================================================
+# SECTION 1: Initramfs (Alpine VM) Build
+# ==============================================================================
+
+# Stage 1: Download Alpine aarch64 artifacts
 FROM alpine:3.23 AS downloader
-
 RUN apk add --no-cache wget cpio gzip tar xorriso
-
 WORKDIR /downloads
-
-# Download Alpine aarch64 netboot tarball (contains vmlinuz-virt + initramfs-virt)
 RUN wget -q https://dl-cdn.alpinelinux.org/alpine/v3.23/releases/aarch64/alpine-netboot-3.23.3-aarch64.tar.gz \
-    && mkdir -p /netboot \
-    && tar -xf alpine-netboot-3.23.3-aarch64.tar.gz -C /netboot
-
-# Download Alpine aarch64 virt ISO
+    && mkdir -p /netboot && tar -xf alpine-netboot-3.23.3-aarch64.tar.gz -C /netboot
 RUN wget -q https://dl-cdn.alpinelinux.org/alpine/v3.23/releases/aarch64/alpine-virt-3.23.3-aarch64.iso \
-    && mkdir -p /iso \
-    && xorriso -osirrox on -indev alpine-virt-3.23.3-aarch64.iso -extract / /iso 2>/dev/null || true
+    && mkdir -p /iso && xorriso -osirrox on -indev alpine-virt-3.23.3-aarch64.iso -extract / /iso 2>/dev/null || true
 
-# Extract kernel from netboot
-RUN cp /netboot/boot/vmlinuz-virt /vmlinuz-virt \
-    && ls -lh /vmlinuz-virt
-
-# -----------------------------------------------------------
-# Stage 2: Build the custom rootfs on real aarch64 Alpine
-# (runs transparently via qemu-user-static + binfmt_misc)
-# -----------------------------------------------------------
+# Stage 2: Build the custom rootfs (aarch64)
 FROM --platform=linux/arm64/v8 alpine:3.23 AS rootfs-builder
-
-# Install all packages needed in the VM
 RUN apk update && apk add --no-cache \
-    linux-virt \
-    bash \
-    busybox \
-    busybox-extras \
-    ttyd \
-    podman \
-    podman-remote \
-    netavark \
-    aardvark-dns \
-    fuse-overlayfs \
-    slirp4netns \
-    iptables \
-    ip6tables \
-    shadow-uidmap \
-    ca-certificates \
-    crun \
-    curl \
-    e2fsprogs \
-    util-linux \
-    openrc \
-    dropbear \
-    ncurses-terminfo-base \
-    musl-locales
-
-# Podman/container config is written at boot by init-podroid
-
-# Copy the custom init script
+    linux-virt bash busybox busybox-extras ttyd podman podman-remote \
+    netavark aardvark-dns fuse-overlayfs slirp4netns iptables ip6tables \
+    shadow-uidmap ca-certificates crun curl e2fsprogs util-linux openrc \
+    dropbear ncurses-terminfo-base musl-locales
 COPY init-podroid /init
 RUN chmod +x /init
-
-# Pin linux-virt to its installed version so apk upgrade won't touch it.
-# The kernel is loaded externally via QEMU -kernel; modules must match.
 RUN VER=$(apk info -ve linux-virt | head -1 | sed 's/^linux-virt-//') && \
-    sed -i "s/^linux-virt$/linux-virt=$VER/" /etc/apk/world && \
-    echo "Pinned: linux-virt=$VER"
+    sed -i "s/^linux-virt$/linux-virt=$VER/" /etc/apk/world
+RUN rm -rf /var/cache/apk/* /tmp/* /var/tmp/* /usr/share/man /usr/share/doc
 
-# Clean up apk cache to minimize image size
-RUN rm -rf /var/cache/apk/* /tmp/* /var/tmp/* \
-    && rm -rf /usr/share/man /usr/share/doc
-
-# -----------------------------------------------------------
-# Stage 3: Pack everything into initramfs
-# -----------------------------------------------------------
+# Stage 3: Pack Initramfs
 FROM alpine:3.23 AS packer
-
 RUN apk add --no-cache cpio gzip findutils
-
-# Copy kernel from rootfs-builder (matches the modules version)
 COPY --from=rootfs-builder /boot/vmlinuz-virt /output/vmlinuz-virt
-
-# Copy the full rootfs from stage 2
 COPY --from=rootfs-builder / /rootfs/
+RUN rm -rf /rootfs/proc/* /rootfs/sys/* /rootfs/dev/* /rootfs/run/* /rootfs/tmp/* /rootfs/boot
+RUN cd /rootfs && find . | cpio -o -H newc 2>/dev/null | gzip -9 > /output/initrd.img
 
-# Remove things we don't need in initramfs
-RUN rm -rf /rootfs/proc/* /rootfs/sys/* /rootfs/dev/* \
-    /rootfs/run/* /rootfs/tmp/* /rootfs/boot
+# ==============================================================================
+# SECTION 2: QEMU & Bridge (Android ARM64) Build
+# ==============================================================================
 
-# Create the initramfs
-RUN cd /rootfs && \
-    find . | cpio -o -H newc 2>/dev/null | gzip -9 > /output/initrd.img && \
-    ls -lh /output/initrd.img /output/vmlinuz-virt
+FROM debian:bookworm AS qemu-builder
+ARG QEMU_VERSION=11.0.0-rc2
+ENV QEMU_DIR=qemu-${QEMU_VERSION}
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    wget curl unzip xz-utils ca-certificates git bzip2 ninja-build python3 python3-pip \
+    pkg-config flex bison make cmake autoconf automake libtool libglib2.0-dev \
+    libglib2.0-bin gettext libintl-perl binutils-aarch64-linux-gnu patchelf \
+    && rm -rf /var/lib/apt/lists/*
+RUN pip3 install --break-system-packages meson 2>/dev/null || pip3 install meson
 
-# Final stage: just hold the output files
-FROM scratch
-COPY --from=packer /output/ /
+# NDK
+RUN wget -q https://dl.google.com/android/repository/android-ndk-r27c-linux.zip -O /tmp/ndk.zip \
+    && unzip -q /tmp/ndk.zip -d /opt && mv /opt/android-ndk-r27c /opt/ndk && rm /tmp/ndk.zip
+ENV NDK=/opt/ndk LLVM=/opt/ndk/toolchains/llvm/prebuilt/linux-x86_64 PREFIX=/opt/deps
+ENV CC="${LLVM}/bin/aarch64-linux-android28-clang" AR="${LLVM}/bin/llvm-ar" RANLIB="${LLVM}/bin/llvm-ranlib"
+RUN mkdir -p ${PREFIX}/{lib,include,lib/pkgconfig}
+
+# Cross-compilation setup
+RUN printf '#!/bin/sh\nexport PKG_CONFIG_LIBDIR=/opt/deps/lib/pkgconfig\nexport PKG_CONFIG_PATH=\nexec pkg-config "$@"\n' \
+    > /usr/local/bin/aarch64-android-pkg-config && chmod +x /usr/local/bin/aarch64-android-pkg-config \
+    && ln -s /usr/local/bin/aarch64-android-pkg-config ${LLVM}/bin/llvm-pkg-config
+
+RUN cat > /opt/cross-android-aarch64.ini << 'EOF'
+[binaries]
+c = '/opt/ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android28-clang'
+cpp = '/opt/ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android28-clang++'
+ar = '/opt/ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar'
+strip = '/opt/ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip'
+ranlib = '/opt/ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ranlib'
+nm = '/opt/ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-nm'
+pkg-config = '/usr/local/bin/aarch64-android-pkg-config'
+[properties]
+sys_root = '/opt/ndk/toolchains/llvm/prebuilt/linux-x86_64/sysroot'
+pkg_config_libdir = ['/opt/deps/lib/pkgconfig']
+c_args = ['--sysroot=/opt/ndk/toolchains/llvm/prebuilt/linux-x86_64/sysroot', '-target', 'aarch64-linux-android28', '-I/opt/deps/include', '-fPIC', '-O2', '-march=armv8-a']
+cpp_args = ['--sysroot=/opt/ndk/toolchains/llvm/prebuilt/linux-x86_64/sysroot', '-target', 'aarch64-linux-android28', '-I/opt/deps/include', '-fPIC', '-O2', '-march=armv8-a']
+c_link_args = ['--sysroot=/opt/ndk/toolchains/llvm/prebuilt/linux-x86_64/sysroot', '-target', 'aarch64-linux-android28', '-L/opt/deps/lib', '-Wl,-z,max-page-size=16384']
+cpp_link_args = ['--sysroot=/opt/ndk/toolchains/llvm/prebuilt/linux-x86_64/sysroot', '-target', 'aarch64-linux-android28', '-L/opt/deps/lib', '-Wl,-z,max-page-size=16384']
+[host_machine]
+system = 'linux'
+cpu_family = 'aarch64'
+cpu = 'aarch64'
+endian = 'little'
+EOF
+
+# Deps (pcre2, libffi, glib, pixman, libattr, libucontext)
+RUN wget -q https://github.com/PCRE2Project/pcre2/releases/download/pcre2-10.44/pcre2-10.44.tar.gz && tar xf pcre2-10.44.tar.gz && cd pcre2-10.44 && ./configure --host=aarch64-linux-android --prefix=${PREFIX} --enable-static --disable-shared CC="${CC}" && make -j$(nproc) install
+RUN wget -q https://github.com/libffi/libffi/releases/download/v3.4.6/libffi-3.4.6.tar.gz && tar xf libffi-3.4.6.tar.gz && cd libffi-3.4.6 && ./configure --host=aarch64-linux-android --prefix=${PREFIX} --enable-static --disable-shared CC="${CC}" && make -j$(nproc) install
+RUN wget -q https://download.gnome.org/sources/glib/2.82/glib-2.82.5.tar.xz && tar xf glib-2.82.5.tar.xz && cd glib-2.82.5 && meson setup _build --cross-file /opt/cross-android-aarch64.ini --prefix ${PREFIX} --default-library static -Dselinux=disabled -Dlibmount=disabled && ninja -C _build install
+RUN wget -q https://cairographics.org/releases/pixman-0.44.2.tar.xz && tar xf pixman-0.44.2.tar.xz && cd pixman-0.44.2 && meson setup _build --cross-file /opt/cross-android-aarch64.ini --prefix ${PREFIX} --default-library static -Da64-neon=disabled && ninja -C _build install
+RUN wget -q https://download.savannah.gnu.org/releases/attr/attr-2.5.2.tar.gz && tar xf attr-2.5.2.tar.gz && cd attr-2.5.2 && ./configure --host=aarch64-linux-android --prefix=${PREFIX} --enable-static --disable-shared CC="${CC}" && make -j$(nproc) install && cp ${PREFIX}/lib/libattr.a ${LLVM}/sysroot/usr/lib/aarch64-linux-android/28/libattr.a
+RUN git clone --depth=1 https://github.com/kaniini/libucontext.git /tmp/libucontext && make -C /tmp/libucontext ARCH=aarch64 CC="${CC}" EXPORT_UNPREFIXED=yes && install -Dm644 /tmp/libucontext/libucontext.a ${PREFIX}/lib/libucontext.a && install -Dm644 /tmp/libucontext/include/libucontext/libucontext.h ${PREFIX}/include/libucontext/libucontext.h && install -Dm644 /tmp/libucontext/arch/common/include/libucontext/bits.h ${PREFIX}/include/libucontext/bits.h \
+    && printf '#ifndef PODROID_UCONTEXT_SHIM_H\n#define PODROID_UCONTEXT_SHIM_H\n#include_next <ucontext.h>\n#include <libucontext/libucontext.h>\n#define getcontext libucontext_getcontext\n#define makecontext libucontext_makecontext\n#define setcontext libucontext_setcontext\n#define swapcontext libucontext_swapcontext\n#endif\n' > ${PREFIX}/include/ucontext.h
+
+# QEMU Build
+RUN wget -q https://download.qemu.org/${QEMU_DIR}.tar.xz && tar xf ${QEMU_DIR}.tar.xz
+RUN sed -i "s/rt = cc.find_library('rt', required: true)/rt = cc.find_library('rt', required: false)/" ${QEMU_DIR}/meson.build
+RUN printf '#undef st_atime_nsec\n#undef st_mtime_nsec\n#undef st_ctime_nsec\n' | cat - ${QEMU_DIR}/fsdev/9p-marshal.h > /tmp/9p-marshal.h && mv /tmp/9p-marshal.h ${QEMU_DIR}/fsdev/9p-marshal.h
+RUN cd ${QEMU_DIR} && ./configure --cc="${CC}" --cross-prefix="${LLVM}/bin/llvm-" --extra-cflags="-fPIC -DANDROID -I${PREFIX}/include -I${PREFIX}/include/glib-2.0 -I${PREFIX}/lib/glib-2.0/include" --extra-ldflags="-L${PREFIX}/lib -Wl,-z,max-page-size=16384 ${PREFIX}/lib/libucontext.a" --prefix=/opt/qemu-out --target-list=aarch64-softmmu --enable-tcg --enable-slirp --enable-virtfs --enable-pie --disable-docs --disable-gtk --disable-sdl --disable-vnc --disable-vhost-user --with-coroutine=ucontext && make -j$(nproc) install
+
+# Bridge
+COPY podroid-bridge.c /tmp/podroid-bridge.c
+RUN ${CC} --sysroot=${LLVM}/sysroot -target aarch64-linux-android28 -fPIE -pie -Wl,-z,max-page-size=16384 /tmp/podroid-bridge.c -o /opt/qemu-out/libpodroid-bridge.so
+
+# Soname fix
+RUN cp /opt/qemu-out/bin/qemu-system-aarch64 /opt/qemu-out/libqemu-system-aarch64.so \
+    && cp /opt/qemu-out/lib/libslirp.so.0 /opt/qemu-out/libslirp.so \
+    && patchelf --set-soname libslirp.so /opt/qemu-out/libslirp.so \
+    && patchelf --replace-needed libslirp.so.0 libslirp.so /opt/qemu-out/libqemu-system-aarch64.so
+
+# ==============================================================================
+# SECTION 3: Final Artifacts Stage
+# ==============================================================================
+
+FROM scratch AS final
+# Initramfs
+COPY --from=packer /output/vmlinuz-virt /vmlinuz-virt
+COPY --from=packer /output/initrd.img /initrd.img
+# QEMU
+COPY --from=qemu-builder /opt/qemu-out/libqemu-system-aarch64.so /libqemu-system-aarch64.so
+COPY --from=qemu-builder /opt/qemu-out/libslirp.so /libslirp.so
+COPY --from=qemu-builder /opt/qemu-out/libpodroid-bridge.so /libpodroid-bridge.so
+COPY --from=qemu-builder /opt/qemu-out/share/qemu/efi-virtio.rom /qemu/efi-virtio.rom
+COPY --from=qemu-builder /opt/qemu-out/share/qemu/keymaps/ /qemu/keymaps/
