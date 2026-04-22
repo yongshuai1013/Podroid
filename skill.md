@@ -1,19 +1,20 @@
 # Podroid AI Context
 
-> **Last updated:** 2026-04-15
-> **Purpose:** Complete project context for AI-assisted development without re-explaining structure every prompt.
+> **Last updated:** 2026-04-22
+> **Purpose:** Complete project context for AI-assisted development. Read this before touching any file.
 
 ---
 
 ## Project Overview
 
-**Podroid** is an Android app that runs Linux containers (Podman) on arm64 Android devices without root required. It spins up a lightweight Alpine Linux VM using QEMU and provides a built-in serial terminal.
+**Podroid** is an Android app that runs rootless Podman containers on arm64 Android devices with no root required. It spins up a headless Alpine Linux 3.23 VM using QEMU TCG and exposes a serial console terminal inside the app.
 
-- **Package:** `com.excp.podroid`
-- **Min SDK:** 28 (Android 9.0)
+- **Package:** `com.excp.podroid` (debug: `com.excp.podroid.debug`)
+- **Min SDK:** 28 (Android 9.0)  
 - **Target SDK:** 36
-- **Architecture:** AArch64 only
-- **License:** GNU GPL v2.0
+- **Architecture:** AArch64 only (no x86/x86_64)
+- **Root project name in Gradle:** `VirtuDroid`
+- **GitHub:** https://github.com/ExTV/Podroid
 
 ---
 
@@ -21,15 +22,15 @@
 
 | Layer | Technology |
 |-------|------------|
-| UI | Jetpack Compose (Material 3) |
-| DI | Hilt |
-| Async | Kotlin Coroutines + Flow |
+| UI | Jetpack Compose + Material 3 |
+| DI | Hilt (constructor injection, no @Provides) |
+| Async | Kotlin Coroutines + StateFlow |
 | Persistence | DataStore Preferences |
-| Terminal | Termux TerminalView (VT100/xterm emulation) |
-| VM | QEMU TCG (no KVM) |
+| Terminal | Termux TerminalView v0.118.1 (JitPack AAR) |
+| VM | QEMU 11.0.0-rc2 TCG (no KVM) |
 | Container Runtime | Podman + crun + netavark + slirp4netns |
-| Init System | Custom two-phase initramfs (`init-podroid`) |
-| VM Linux | Alpine Linux 3.23 |
+| VM Init | Custom two-phase shell script (`init-podroid`) |
+| VM Linux | Alpine Linux 3.23 aarch64 |
 
 ---
 
@@ -38,20 +39,30 @@
 ### High-Level Flow
 ```
 Android App
-├── Foreground Service (PodroidService) ← keeps VM alive
-├── PodroidQemu engine
-│   ├── QEMU process (libqemu-system-aarch64.so)
-│   ├── Serial socket → boot monitor
-│   └── QMP socket (port forwarding, VM control)
-└── Jetpack Compose UI
-    └── Screens: Home, Terminal, Settings, Setup
+├── PodroidApplication — extracts assets (vmlinuz, initrd, qemu/) on first run
+├── PodroidService (foreground) — hosts QEMU, holds WakeLock
+├── PodroidQemu (singleton)
+│   ├── QEMU process (libqemu-system-aarch64.so — ELF binary renamed .so for APK)
+│   ├── serial.sock — boot monitor reads until "Ready!", then bridge connects
+│   ├── ctrl.sock — virtio-console for RESIZE signals from bridge
+│   └── qmp.sock — QEMU Machine Protocol for runtime control
+└── Compose UI
+    └── Screens: Setup → Home → Terminal / Settings
 ```
 
-### VM Boot Sequence
-1. QEMU loads `vmlinuz-virt` + `initrd.img`
-2. Phase 1 (`init-podroid`): Mounts persistent ext4 disk as overlayfs upper layer
-3. Phase 2 (`--main`): Configures networking, Podman, Dropbear SSH, starts getty on ttyAMA0
-4. Terminal connects to serial console
+### VM Boot Sequence (critical — read carefully)
+1. QEMU starts, creates `serial.sock` (unix socket, server, single-client)
+2. **Boot monitor** (`PodroidQemu.monitorBootSerial`) connects first to `serial.sock`, streams output to `console.log` and parses `boot_stage` strings for the Android UI
+3. `init-podroid` Phase 1 (running in initramfs): mounts virtio-blk as ext4, creates overlayfs (`lowerdir=/`, `upperdir=/mnt/persist/upper`), `chroot /mnt/overlay /init --main`
+4. `init-podroid` Phase 2 (`--main`): kernel modules → networking → containers → SSH → getty on ttyAMA0
+5. Phase 2 emits `boot_stage "Ready!"` then **sleeps 2 seconds** (critical — lets boot monitor finish reading "Ready!" before bridge steals the single-client socket)
+6. `detectBootStage("Ready!")` fires → `_state = Running` → `autoStartBridge()`
+7. **`releaseSerial()`** closes boot monitor socket (`shutdownInput + shutdownOutput + close`)
+8. **500ms delay** then `TerminalSession` launched with `libpodroid-bridge.so` as subprocess
+9. Bridge binary connects to `serial.sock`, relays PTY ↔ serial bidirectionally
+
+### Single-Client Socket Constraint
+`serial.sock` is QEMU `server,nowait` — only ONE client at a time. Boot monitor connects first. `releaseSerial()` frees it. Bridge has a 50×200ms retry loop. The `sleep 2` in init-podroid and the 500ms `postDelayed` in `autoStartBridge()` are both critical timing guards.
 
 ---
 
@@ -60,100 +71,95 @@ Android App
 ### Root Level
 ```
 /
-├── app/                              # Android application
-├── init-podroid                      # Custom VM init script (shell)
-├── podroid-bridge.c                  # Native PTY↔serial.sock relay binary
-├── build.gradle.kts                  # Root build config
-├── settings.gradle.kts               # Gradle settings
-├── gradle.properties                 # Gradle + QEMU version (11.0.0-rc2)
-├── Dockerfile                        # Multi-stage initramfs builder
-├── Dockerfile.qemu                   # QEMU Docker build
-├── docker-build-initramfs.sh         # Initramfs build script
-├── build-termux-android.sh           # Termux native library build
-├── build-qemu-android.sh             # QEMU Android build
-└── gradle/, gradlew, gradlew.bat     # Gradle wrapper
+├── app/                            # Android application module
+├── init-podroid                    # VM init script (baked into initrd.img as /init)
+├── podroid-bridge.c                # Native PTY↔serial relay (compiled to libpodroid-bridge.so)
+├── Dockerfile                      # Unified multi-stage: downloader → rootfs-builder → packer → qemu-builder → final
+├── build-all.sh                    # Unified build+deploy script
+├── gradle.properties               # podroidQemuVersion=11.0.0-rc2
+├── build.gradle.kts, settings.gradle.kts
+└── gradle/, gradlew
 ```
 
 ### app/src/main/java/com/excp/podroid/
 
 ```
-├── MainActivity.kt                   # Single activity entry point
-├── PodroidApplication.kt             # Hilt Application - asset extraction on first run
+├── MainActivity.kt                 # Single Activity, WindowSizeClass, Hilt entry point
+├── PodroidApplication.kt           # Hilt @HiltAndroidApp, asset extraction on first run
 │
 ├── engine/
-│   ├── PodroidQemu.kt                # QEMU lifecycle, serial.sock boot monitor, ctrl.sock chardev
-│   │   └── KEY: releaseSerial() closes boot monitor so podroid-bridge can connect
-│   ├── QmpClient.kt                  # QEMU QMP socket client for runtime port forwards
-│   └── VmState.kt                    # Sealed class: Idle, Starting, Running, Paused, Saving, Resuming, Stopped, Error
+│   ├── PodroidQemu.kt              # QEMU lifecycle, boot monitor, bridge session, resize
+│   ├── QmpClient.kt                # QMP socket client (runtime port forwarding)
+│   └── VmState.kt                  # Sealed: Idle|Starting|Running|Paused|Saving|Resuming|Stopped|Error
 │
 ├── service/
-│   └── PodroidService.kt             # Foreground service, WakeLock, notifications
-│       └── Actions: ACTION_START, ACTION_STOP | SSH port: 9922
+│   └── PodroidService.kt           # Foreground service, WakeLock, notification with boot stages
+│       └── Actions: ACTION_START, ACTION_STOP
 │
 ├── data/repository/
-│   ├── SettingsRepository.kt         # DataStore-backed settings (darkTheme, vmRam, vmCpus, storageSize, etc.)
-│   ├── PortForwardRepository.kt      # Port forward rules persistence
-│   └── UpdateRepository.kt           # GitHub release checker
+│   ├── SettingsRepository.kt       # DataStore Preferences (all settings)
+│   ├── PortForwardRepository.kt    # Port forward rules (Set<String> in DataStore)
+│   └── UpdateRepository.kt         # GitHub releases API checker
 │
 ├── di/
-│   └── AppModule.kt                  # Hilt module (empty - constructor injection only)
+│   └── AppModule.kt                # Hilt module (minimal — constructor injection used everywhere)
 │
 └── ui/
     ├── navigation/
-    │   └── NavGraph.kt              # Routes: SETUP, HOME, TERMINAL, SETTINGS
-    │       └── TerminalViewModel is scoped outside NavHost (survives navigation)
+    │   └── NavGraph.kt             # Routes: SETUP, HOME, TERMINAL, SETTINGS
+    │       └── TerminalViewModel scoped OUTSIDE NavHost (survives screen navigation)
     │
     ├── theme/
-    │   ├── Theme.kt                 # Material You (dynamic colors) + dark/light
-    │   ├── Color.kt                 # Purple80/Grey80/Cyan80 palette + status colors
-    │   └── Type.kt                  # Typography (default Material 3)
+    │   ├── Theme.kt                # Material You dynamic colors + dark/light
+    │   ├── Color.kt                # Purple80/Grey80/Cyan80 + status colors
+    │   └── Type.kt                 # Default Material 3 typography
+    │
+    ├── HapticManager.kt            # Centralized haptics: extraKeyPress, longPressMenu, bell, error
     │
     └── screens/
+        ├── setup/
+        │   ├── SetupScreen.kt      # 3-page HorizontalPager: Storage / VM config+SSH / Downloads
+        │   └── SetupViewModel.kt   # completeSetup() → DataStore, notification permission request
+        │
         ├── home/
-        │   ├── HomeScreen.kt        # Start/Stop VM, restart, open terminal, update dialog
-        │   └── HomeViewModel.kt     # checkForUpdate(), startPodroid(), stopVm(), restartVm()
+        │   ├── HomeScreen.kt       # Start/Stop/Restart VM, open terminal, update dialog, AdaptiveContainer
+        │   ├── HomeViewModel.kt    # checkForUpdate(), startPodroid(), stopVm(), restartVm()
+        │   └── AnimatedBootProgress.kt  # Rotating arc Canvas + boot stage text (replaces CircularProgressIndicator)
         │
         ├── terminal/
-        │   ├── TerminalScreen.kt    # Termux TerminalView + extra keys bar, layout listener, auto keyboard
-        │   └── TerminalViewModel.kt # TerminalSession with podroid-bridge subprocess, mouse support
+        │   ├── TerminalScreen.kt       # TerminalView composable, extra keys bar, focus observer, pushSize
+        │   ├── TerminalViewModel.kt    # Session wiring, CSI keys, focus events, font/theme, forceUpdateSizeFromView
+        │   ├── ExtraKey.kt             # sealed KeyAction + JSON serde via ExtraKeySerde
+        │   ├── DefaultKeyLayouts.kt    # Built-in layouts: minimal, full (nvim/shell)
+        │   └── QuickSettingsDrawer.kt  # Bottom-sheet: font size, theme, font, extras toggle, haptics
         │
         ├── settings/
-        │   ├── SettingsScreen.kt     # Sections: Terminal → VM Resources → Network → Appearance → Diagnostics → About
-        │   └── SettingsViewModel.kt  # Port forward CRUD, VM reset, console log export
+        │   ├── SettingsScreen.kt   # Sections: VM Resources / Network / Appearance / Diagnostics / About
+        │   │                       # Terminal settings moved to QuickSettingsDrawer (NOT here)
+        │   └── SettingsViewModel.kt # Port forward CRUD, VM reset, console log export
         │
-        └── setup/
-            ├── SetupScreen.kt        # 3-page pager: Storage size, VM config + SSH, Downloads sharing
-            └── SetupViewModel.kt     # completeSetup() saves to DataStore, emits notification permission request
-```
-
-### app/src/main/res/
-```
-├── AndroidManifest.xml               # INTERNET, WAKE_LOCK, VIBRATE, FOREGROUND_SERVICE, POST_NOTIFICATIONS
-├── drawable/                         # ic_vm_notification.xml, ic_stop.xml
-├── mipmap-anydpi/                    # App icons (ic_launcher.xml)
-├── values/                           # strings.xml, colors.xml, themes.xml
-└── xml/
-    ├── file_paths.xml                # FileProvider paths
-    ├── backup_rules.xml              # Full backup rules
-    └── data_extraction_rules.xml     # Android 12+ extraction rules
+        └── components/
+            └── AdaptiveContainer.kt # WindowSizeClass-based max-width wrapper (tablet/foldable)
 ```
 
 ### Assets (app/src/main/assets/)
 ```
-├── vmlinuz-virt                      # Linux kernel (built by docker-build-initramfs.sh)
-├── initrd.img                        # Alpine initramfs with Podman (~71MB, built by docker-build-initramfs.sh)
-├── qemu/                             # QEMU BIOS/firmware files
-├── colors/                           # 114 terminal color schemes (.properties files)
-│   └── dracula.properties, nord.properties, gruvbox-dark.properties, etc.
-└── fonts/                            # 13 curated terminal fonts (.ttf files)
+├── vmlinuz-virt                    # Linux kernel (MUST match modules in initrd.img — same rootfs-builder stage)
+├── initrd.img                      # Alpine initramfs (~71MB compressed)
+├── qemu/
+│   ├── efi-virtio.rom
+│   └── keymaps/
+├── colors/                         # 114 terminal color schemes (.properties files)
+└── fonts/                          # 13 terminal fonts (.ttf)
     └── JetBrains-Mono.ttf, Fira-Code.ttf, CascadiaCode.ttf, etc.
 ```
 
 ### Native Libs (app/src/main/jniLibs/arm64-v8a/)
 ```
-├── libqemu-system-aarch64.so         # QEMU executable (built by build-qemu-android.sh)
-├── libslirp.so                       # SLIRP networking library
-└── libpodroid-bridge.so              # Terminal bridge (built by build-qemu-android.sh from podroid-bridge.c)
+├── libqemu-system-aarch64.so       # QEMU binary renamed .so for APK packaging
+├── libslirp.so                     # SLIRP networking (soname patched from .so.0 via patchelf)
+├── libpodroid-bridge.so            # PTY↔serial bridge binary renamed .so for APK packaging
+└── libtermux.so                    # Termux terminal JNI (custom-built with 16KB page alignment)
 ```
 
 ---
@@ -162,179 +168,296 @@ Android App
 
 | Item | Value |
 |------|-------|
-| QEMU binary | `libqemu-system-aarch64.so` in nativeLibDir |
-| Kernel | `vmlinuz-virt` in filesDir |
-| Initrd | `initrd.img` in filesDir |
-| Storage image | `storage.img` in filesDir (ext4) |
-| QMP socket | `qmp.sock` in filesDir |
-| Serial console | ttyAMA0 → `serial.sock` in filesDir (unix socket, boot monitor + bridge) |
-| Control channel | hvc0 → `ctrl.sock` in filesDir (virtio-console, resize signals) |
-| QMP port (via socket) | 4444 (via unix socket) |
-| VM IP | 10.0.2.15 |
-| Default gateway | 10.0.2.2 |
-| DNS (QEMU SLIRP) | 10.0.2.3 |
-| Default DNS | 8.8.8.8, 1.1.1.1 |
-| SSH host port (auto) | 9922 → VM:22 (Dropbear) |
-| Storage sizes | 2, 4, 8, 16, 32, 64 GB |
-| Default RAM | 512 MB | Range: 512MB – 4GB (512, 1024, 2048, 4096) |
-| Default CPUs | 1 | Range: 1 – 8 (1, 2, 4, 6, 8) |
+| QEMU binary | `libqemu-system-aarch64.so` in `nativeLibraryDir` |
+| Kernel | `filesDir/vmlinuz-virt` |
+| Initrd | `filesDir/initrd.img` |
+| Storage image | `filesDir/storage.img` (ext4, sparse) |
+| serial.sock | `filesDir/serial.sock` — ttyAMA0, single-client, boot monitor then bridge |
+| ctrl.sock | `filesDir/ctrl.sock` — hvc0, bridge writes `RESIZE rows cols\n` |
+| qmp.sock | `filesDir/qmp.sock` |
+| VM IP | 10.0.2.15/24 (SLIRP) |
+| Gateway | 10.0.2.2 |
+| DNS (SLIRP) | 10.0.2.3 (unreliable on Android) + 8.8.8.8, 1.1.1.1 |
+| SSH host port | 9922 → VM:22 (Dropbear, password "podroid") |
+| Default RAM | 512 MB (range: 512–4096) |
+| Default CPUs | 1 (range: 1, 2, 4, 6, 8) |
 | Default font size | 20sp |
-| Boot stages | "Starting QEMU..." → "Booting kernel..." → "Mounting storage..." → "Loading kernel modules..." → "Setting up overlay..." → "Configuring containers..." → "Waiting for network..." → "Network found" → "Almost ready..." → "Starting SSH..." → "Ready" |
-| QEMU args | `-M virt,gic-version=3 -cpu max -accel tcg,thread=multi,tb-size=256` |
-| Storage access mount | virtio-9p with `mount_tag=downloads` → `/mnt/downloads` in VM |
-| Resize daemon | Background shell loop reads `RESIZE rows cols` from `/dev/hvc0`, calls `stty rows N cols M < /dev/ttyAMA0` |
+| Default storage | 2 GB (range: 2–64 GB) |
+| QEMU machine | `-M virt,gic-version=3 -cpu max -accel tcg,thread=multi,tb-size=256` |
+| Kernel cmdline | `console=ttyAMA0 loglevel=1 quiet androidip=<ip> [ssh=1]` |
 
 ---
 
-## DataStore Keys
+## Boot Stage Strings (init-podroid → detectBootStage)
 
-| Key | Type | Default | Description |
-|-----|------|---------|-------------|
-| `dark_theme` | Boolean | true | Dark mode |
-| `vm_ram_mb` | Int | 512 | VM RAM in MB |
-| `vm_cpus` | Int | 1 | VM CPU cores |
-| `terminal_font_size` | Int | 20 | Font size in sp |
-| `terminal_color_theme` | String | "default" | Selected color scheme name |
-| `terminal_font` | String | "default" | Selected font name |
-| `storage_gb` | Int | 2 | Persistent storage size |
-| `storage_access_enabled` | Boolean | false | Downloads folder sharing |
-| `setup_done` | Boolean | false | Initial setup completed |
-| `ssh_enabled` | Boolean | false | SSH server in VM |
-| `port_forwards` | Set\<String\> | {} | Serialized PortForwardRule |
-| `dismissed_update_version` | String | null | Dismissed update version |
+These exact strings are emitted by `init-podroid` and matched by `PodroidQemu.detectBootStage()`:
+
+| String in serial output | Android UI label |
+|------------------------|-----------------|
+| `Initializing system...` | (no UI change — first phase 2 line) |
+| `Loading kernel modules...` | "Loading kernel modules..." |
+| `Waiting for network...` | (no match — intermediate) |
+| `Network found` | "Network found" |
+| `Configuring containers...` | "Configuring containers..." |
+| `Starting SSH...` | "Starting SSH..." |
+| `Almost ready...` | "Almost ready..." |
+| `Ready!` | "Ready" → state = Running → autoStartBridge() |
+
+Also detected: `Mounting storage...`, `Booting kernel...` (emitted by PodroidQemu itself, not init-podroid).
+
+**Critical**: After `boot_stage "Ready!"`, init-podroid does `sleep 2` before starting the getty loop. This is intentional — gives the boot monitor time to read "Ready!" before the single-client serial.sock becomes available to the bridge.
 
 ---
 
-## Port Forwarding System
+## init-podroid Structure
 
-### Format
+### Phase 1 (runs in initramfs as PID 1)
+```bash
+# Located AFTER the `if [ "$1" = "--main" ]; then ... fi` block (at end of file)
+mount proc/sys/dev
+depmod -a && modprobe virtio_blk  # must load virtio_blk to get /dev/vda
+find /dev/vda or /dev/vdb → PERSIST_DEV
+mount -t ext4 PERSIST_DEV /mnt/persist  # mkfs.ext4 if needed
+mkdir -p /mnt/persist/upper /mnt/persist/work /mnt/overlay
+mount -t overlay overlay -o lowerdir=/,upperdir=...,workdir=... /mnt/overlay
+exec chroot /mnt/overlay /init --main
+# FALLBACK (if overlay failed): exec /init --main  ← runs without persistence
 ```
-"tcp:8080:80" → PortForwardRule(hostPort=8080, guestPort=80, protocol="tcp")
+
+**Critical bug to avoid**: The fallback at end of Phase 1 must NOT be `exec chroot /mnt/overlay /init --main` — if overlay failed, `/mnt/overlay` may not exist → kernel panic. Must be `exec /init --main`.
+
+**Critical bug to avoid**: vmlinuz-virt and modules in initrd.img MUST come from the SAME rootfs-builder Docker stage. The Dockerfile copies vmlinuz from `rootfs-builder /boot/vmlinuz-virt` (NOT from the netboot downloader stage). Mismatched kernel/modules = `modprobe virtio_blk` silently skipped = no block device = no storage mount = kernel panic.
+
+### Phase 2 (`--main` flag, runs inside chroot overlay)
+```bash
+boot_stage "Initializing system..."
+# mount proc/sys/devtmpfs/devpts/tmpfs/cgroup2
+boot_stage "Loading kernel modules..."
+# depmod + modprobe (virtio_net, virtio_blk, fuse, tun, veth, bridge, overlay, ...)
+boot_stage "Waiting for network..."
+# wait for eth0 with IP (loop), set up resolv.conf (8.8.8.8, 1.1.1.1)
+boot_stage "Network found"  or  boot_stage "Network found"  (after timeout)
+boot_stage "Configuring containers..."
+# sysctl, /etc/subuid, containers.conf, storage.conf, registries.conf
+boot_stage "Starting SSH..."  # only if ssh=1 in kernel cmdline
+# dropbearkey + dropbear
+boot_stage "Almost ready..."
+# MOTD generation with internet check, bash profile + aliases
+# resize daemon: background loop reads RESIZE from /dev/hvc0, calls stty on /dev/ttyAMA0
+# write podroid-login wrapper: #!/bin/bash; cat /etc/motd; exec script -q -c 'exec /bin/bash --login' /dev/null
+boot_stage "Ready!"
+rm -f /run/boot_stage
+sleep 2   # ← CRITICAL: let boot monitor read "Ready!" before bridge steals socket
+while true; do
+    /sbin/getty -n -l /usr/local/bin/podroid-login 0 ttyAMA0 xterm-256color
+    sleep 1
+done
 ```
 
-### Service Presets (in SettingsScreen)
-- **Pi-hole:** 5300→53(both), 8080→80(tcp)
-- **Nginx:** 8080→80, 8443→443
-- **Gitea:** 3000→3000, 2222→22
-- **Grafana:** 3001→3000
-
-### Runtime Management
-- At VM start: rules passed as QEMU `-netdev hostfwd` args
-- At runtime: QMP `hostfwd_add`/`hostfwd_remove` via `human-monitor-command`
+### podroid-login (written by init-podroid at runtime)
+```bash
+#!/bin/bash
+cat /etc/motd 2>/dev/null
+exec /usr/bin/script -q -c 'exec /bin/bash --login' /dev/null
+```
+The `script` wrapper is required for nvim to work correctly — it allocates a proper PTY inside the serial terminal session.
 
 ---
 
 ## Terminal Architecture
 
-### Current Design (Podroid-Bridge PTY)
-QEMU serial console exposed as a Unix socket (`serial.sock`). A native bridge binary
-(`libpodroid-bridge.so`) runs as the `TerminalSession` subprocess — Termux allocates a
-real PTY for it. The bridge relays PTY ↔ serial socket bidirectionally with no filtering.
-The bridge sets its PTY to raw mode via `cfmakeraw()` (VM's getty handles
-echo/line editing). Window resize propagates via the PTY/SIGWINCH chain:
-
-```
-TerminalView layout change
-  → TerminalView.updateSize()                 [uses renderer font metrics]
-  → TerminalSession.updateSize(cols, rows)    [Termux JNI: ioctl TIOCSWINSZ on PTY master]
-  → SIGWINCH → podroid-bridge
-  → bridge reads new size via TIOCGWINSZ
-  → writes "RESIZE rows cols\n" to ctrl.sock
-  → VM resize daemon reads /dev/hvc0
-  → stty rows N cols M < /dev/ttyAMA0         [Linux kernel sends SIGWINCH to fg process group]
-  → nvim / htop / btop redraws correctly
-```
-
-Mouse tracking is fully supported: Termux TerminalView natively handles mouse events
-(touch gestures, USB/Bluetooth mouse buttons and scroll). When TUI apps enable mouse
-mode (CSI 1000h), mouse clicks and scrolls route to the PTY → bridge → serial → VM.
-
-**Auto keyboard**: When TerminalScreen opens with VM running, the Android soft keyboard
-is shown automatically via `InputMethodManager.showSoftInput()` so users can type immediately.
-
-### Socket Files (in filesDir)
-| File | Purpose |
-|------|---------|
-| `serial.sock` | QEMU serial chardev (ttyAMA0) — bridge connects here for terminal I/O |
-| `ctrl.sock` | QEMU virtio-console chardev (hvc0) — bridge writes `RESIZE rows cols\n` here |
-| `qmp.sock` | QEMU QMP control socket |
-
 ### Data Flow
 ```
-Keyboard  → TerminalView → TerminalSession.write() → PTY master → bridge stdin → serial.sock → ttyAMA0
-VM output → serial.sock → bridge stdout → PTY slave → TerminalSession → TerminalEmulator → TerminalView
-Resize    → PTY TIOCSWINSZ → SIGWINCH → bridge → ctrl.sock → VM hvc0 daemon → stty → SIGWINCH in VM
-Mouse     → TerminalView (touch/mouse) → sendMouseEventCode() → PTY → bridge → serial → VM
+Keyboard  → TerminalView → TerminalSession.write() → PTY master fd
+                                                           ↓
+                                            podroid-bridge stdin (PTY slave)
+                                                           ↓
+                                              serial.sock → ttyAMA0 in VM
+VM output → ttyAMA0 → serial.sock → bridge stdout → PTY slave → TerminalEmulator → TerminalView
+Resize    → TerminalView.updateSize() → TIOCSWINSZ on PTY → SIGWINCH → bridge
+                                           → bridge reads TIOCGWINSZ
+                                           → writes "RESIZE rows cols\n" to ctrl.sock
+                                           → VM daemon reads /dev/hvc0
+                                           → stty rows N cols M < /dev/ttyAMA0
+                                           → Linux SIGWINCH to VM fg process group
+Mouse     → TerminalView touch handler → PTY → bridge → serial → VM
 ```
 
-### CSI 6n / nvim Support
-No CSI 6n filtering in the bridge. The shell (`set +o checkwinsize` in `/etc/profile`)
-does not send cursor position queries. nvim's TUI initializes correctly.
+### PodroidQemu Key Methods
 
-### Boot Monitoring
-`PodroidQemu` connects to `serial.sock` via `android.net.LocalSocket` and reads until
-the "Ready" stage is detected (writing to `console.log`). `releaseSerial()` shuts
-down the socket input/output and closes it so `podroid-bridge` can connect when
-the user opens the terminal.
+| Method | What it does |
+|--------|-------------|
+| `start(portForwards, ramMb, cpus, sshEnabled, androidIp)` | Launches QEMU process, starts boot monitor coroutine, 60s timeout fallback |
+| `monitorBootSerial(proc)` | Reads serial.sock, writes console.log, calls detectBootStage() |
+| `detectBootStage(text)` | Matches boot stage strings, sets _bootStage and _state |
+| `releaseSerial()` | shutdownInput + shutdownOutput + close on bootSocket |
+| `autoStartBridge()` | Posts to MainLooper, calls releaseSerial(), 500ms delay, creates TerminalSession |
+| `createTerminalSession(client)` | Returns pre-started session or creates new one; sets sessionClientDelegate |
+| `replayBootOutput(sess)` | Appends post-"Ready!" serial bytes to new emulator (so first screen isn't blank) |
+| `cleanup()` | Cancels ioScope, kills session, deletes socket files |
 
-**Serial handoff timing**: QEMU serial socket (`server,nowait`) only serves one client
-at a time. `releaseSerial()` uses `shutdownInput()` + `shutdownOutput()` + `close()`
-to reliably interrupt the boot monitor's blocking read. `createSession()` sleeps 500ms
-after `releaseSerial()` to let QEMU re-listen. The bridge binary also has a retry
-loop (50 attempts × 200ms = 10s max) as defense in depth.
+### TerminalViewModel Key Patterns
 
-### Extra Keys
-ESC, TAB, CTRL (sticky), ALT (sticky),
-arrows, HOME, END, PGUP, PGDN, F1-F12, -, /, |
+**`forceUpdateSizeFromView(view)`**: Computes cols/rows from `Paint` metrics using `currentTypeface` and raw `terminalFontSize.value.toFloat()` (NO scaledDensity multiplication — matches TerminalView's internal path exactly). Must use `currentTypeface` not `Typeface.MONOSPACE` for custom fonts.
+
+**`pushSizeNow()`**: Fires `v.updateSize()` immediately + at 300ms + 800ms. Called after font size changes and after closing QuickSettings.
+
+**`forceUpdateSizeFromView` via pushSize in TerminalScreen**: Fires at 0/150/600/1500ms after layout change to outlast lazy layout settling.
+
+**Focus events**: `TerminalScreen` installs `LifecycleEventObserver`. ON_RESUME → `sendFocusEvent(true)` → `\x1b[I`. ON_PAUSE → `sendFocusEvent(false)` → `\x1b[O`. Gated on DECSET 1004 via reflection on `mCurrentDecSetFlags`.
+
+**Proxy sessionClient** (`proxySessionClient` in PodroidQemu): Delegates to `sessionClientDelegate`. Lets session be created at boot-complete time before UI exists. TerminalViewModel sets itself as delegate via `qemu.sessionClientDelegate = sessionClient`.
+
+### Key Sequences (TerminalViewModel.viewClient.onKeyDown)
+
+```
+mod = 1 + (shift?1:0) + (alt?2:0) + (ctrl?4:0)
+arrow(final): if mod==1 → "\x1b[$final"  else → "\x1b[1;$mod$final"
+```
+
+| Key | Sequence |
+|-----|----------|
+| Shift+Tab | `\x1b[Z` |
+| Ctrl+Left/Right | `\x1b[1;5D` / `\x1b[1;5C` |
+| Shift+Up/Down | `\x1b[1;2A` / `\x1b[1;2B` |
+| F1–F4 | `\x1bOP` … `\x1bOS` |
+| F5–F12 | `\x1b[15~` … `\x1b[24~` |
+
+**Bracketed paste**: `onPasteTextFromClipboard` calls `emu.paste(text)` — Termux wraps in `\x1b[200~…\x1b[201~` when DECSET 2004 is active.
+
+**Extra keys hold-to-repeat**: `KeyButton` composable uses `pointerInput + LaunchedEffect` — 400ms initial delay then 70ms → 30ms accelerating cadence. Only arrow keys flagged `repeatable = true`.
+
+**CTRL/ALT sticky**: `extraCtrl` / `extraAlt` toggles on the extras bar. Consumed after any non-modifier key press.
 
 ---
 
-## init-podroid (VM init script)
+## podroid-bridge.c
 
-### Phase 1 (Early init, before overlay)
-- Mount proc/sys/dev
-- Load virtio modules (virtio_pci, virtio_net, virtio_blk)
-- Detect persistent storage device (vda/vdb)
-- Mount ext4, create overlayfs (lower=/, upper=/mnt/persist/upper, work=/mnt/persist/work)
-- `chroot /mnt/overlay /init --main`
+- **Purpose**: Relay PTY (Termux-allocated) ↔ `serial.sock` (QEMU serial)
+- **Arguments**: `bridge_exe serial_sock_path ctrl_sock_path`
+- **STDERR silenced** immediately via `dup2(/dev/null, STDERR_FILENO)` — bridge runs as TerminalSession subprocess so stderr IS the PTY
+- **`cfmakeraw()`** on own stdin (VM's getty handles echo/line editing)
+- **serial.sock retry**: 50 attempts × 200ms = 10s max
+- **ctrl.sock retry**: 50 × 100ms = 5s max; lazy reconnect on each SIGWINCH if not yet connected
+- **`filter_queries()`**: Intercepts `ESC[18t` / `ESC[19t` (xterm window size queries from busybox `less`), responds locally with fake size, strips bytes — prevents garbage in terminal output
+- **`send_resize()`**: On SIGWINCH, reads new size via `TIOCGWINSZ`, writes `RESIZE rows cols\n` to ctrl.sock
+- **select timeout**: 50ms (allows SIGWINCH handling without blocking)
 
-### Phase 2 (--main flag)
-- Mount filesystems (proc, sys, devtmpfs, devpts, tmpfs)
-- busybox --install -s
-- Network setup (SLIRP: 10.0.2.15/24, gateway 10.0.2.2, DNS 10.0.2.3)
-- Downloads folder mount via 9p virtio
-- Container config (sysctl, /etc/subuid, containers.conf, storage.conf, registries.conf, crun.conf)
-- SSH setup (Dropbear): RSA host key via `dropbearkey`, password "podroid"
-- MOTD with VM info
-- Resize control daemon: background loop reads `RESIZE rows cols` from `/dev/hvc0`,
-  calls `stty rows N cols M < /dev/ttyAMA0`
-- `podroid-login` wrapper for getty
-- getty on ttyAMA0
+---
+
+## Dockerfile (Unified Multi-Stage)
+
+### Stages
+```
+downloader     — downloads Alpine netboot tarball (currently unused for vmlinuz — see CRITICAL below)
+rootfs-builder — --platform=linux/arm64/v8, installs all Alpine packages via apk, copies init-podroid as /init
+packer         — cpio + gzip the rootfs into initrd.img; copies vmlinuz from rootfs-builder
+qemu-builder   — debian:bookworm + NDK r27c, cross-compiles QEMU 11.0.0-rc2 + podroid-bridge + deps
+final          — scratch stage, collects all output artifacts
+```
+
+### CRITICAL: vmlinuz source
+The packer stage copies `vmlinuz-virt` from **`rootfs-builder /boot/vmlinuz-virt`** (the kernel installed by `apk add linux-virt`). This ensures vmlinuz and `/lib/modules/$KVER/` are the same version. **Never copy vmlinuz from the downloader/netboot tarball** — that is a different Alpine release and causes a kernel/modules version mismatch → `modprobe virtio_blk` silently fails → no block device → kernel panic.
+
+### QEMU Build Details
+- NDK r27c, API 28 sysroot
+- Dependencies (static): pcre2, libffi, glib 2.82.5, pixman 0.44.2, libattr, libucontext
+- **libucontext shim**: Android Bionic lacks `ucontext.h` → built from kaniini/libucontext; header shim remaps `getcontext/swapcontext/etc.` to libucontext functions
+- **`--with-coroutine=ucontext`**: Required for ARMv9.2 PAC (Android 15+ Tensor devices) — avoids SIGILL from siglongjmp across alternate signal stacks
+- **librt optional** patch: Bionic includes librt functions in libc
+- **`st_*_nsec` undef** patch: Android's `sys/stat.h` macros clash with 9p struct fields
+- **patchelf**: libslirp soname patched from `libslirp.so.0` → `libslirp.so`
+
+### 16KB Page Alignment
+All native libs must have `p_align >= 16384`. Enforced via `-Wl,-z,max-page-size=16384` everywhere. Required for Android devices with 16KB system pages. Verified by Python ELF parser in `build-all.sh`.
+
+### VM Rootfs Packages (Alpine 3.23 aarch64)
+```
+linux-virt bash busybox busybox-extras ttyd podman podman-remote
+netavark aardvark-dns fuse-overlayfs slirp4netns iptables ip6tables
+shadow-uidmap ca-certificates crun curl e2fsprogs util-linux openrc
+dropbear ncurses-terminfo-base musl-locales
+```
 
 ---
 
 ## Build Commands
 
 ```bash
-# Build initramfs (requires Docker with multi-arch)
-./docker-build-initramfs.sh
+# Build initramfs (Docker required, ~3min first time, cached after)
+./build-all.sh initramfs
+# → app/src/main/assets/vmlinuz-virt + initrd.img
 
-# Build QEMU + bridge (requires Docker)
-./build-qemu-android.sh
+# Build QEMU + bridge (Docker, ~30min first time)
+./build-all.sh qemu
+# → app/src/main/jniLibs/arm64-v8a/{libqemu-system-aarch64.so,libslirp.so,libpodroid-bridge.so}
+# → app/src/main/assets/qemu/
 
-# Build Termux terminal lib with 16KB page alignment (requires NDK)
-./build-termux-android.sh
+# Build Termux JNI lib (local NDK)
+./build-all.sh termux
+# → app/src/main/jniLibs/arm64-v8a/libtermux.so
 
 # Build APK
 ./gradlew assembleDebug
 
-# Uninstall + install
-adb uninstall com.excp.podroid.debug && adb install -r app/build/outputs/apk/debug/app-debug.apk
+# Uninstall + install (debug package)
+adb uninstall com.excp.podroid.debug
+adb install -r app/build/outputs/apk/debug/app-debug.apk
+
+# Fast bridge rebuild (without full Docker QEMU build)
+NDK=$HOME/Android/Sdk/ndk/$(ls ~/Android/Sdk/ndk/ | tail -1)
+CC=$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android28-clang
+$CC --sysroot=$NDK/toolchains/llvm/prebuilt/linux-x86_64/sysroot \
+    -target aarch64-linux-android28 -fPIE -pie -Wl,-z,max-page-size=16384 \
+    podroid-bridge.c -o app/src/main/jniLibs/arm64-v8a/libpodroid-bridge.so
+./gradlew :app:installDebug
+
+# Full rebuild + deploy
+./build-all.sh all
+
+# Automated boot test
+./build-all.sh test
 ```
 
-**Workflow**: If initramfs modified → `docker-build-initramfs.sh` → `gradlew assembleDebug` →
-`adb uninstall com.excp.podroid.debug && adb install -r`. If only APK code modified → just the
-last three steps.
+**Workflow**:
+- `init-podroid` changed → `./build-all.sh initramfs` → `gradlew assembleDebug` → `adb install`
+- Kotlin/Java only → `gradlew assembleDebug` → `adb install`
+- `podroid-bridge.c` changed → fast bridge rebuild above → `adb install`
+- Check boot: `adb shell run-as com.excp.podroid.debug cat files/console.log`
+
+---
+
+## DataStore Keys (SettingsRepository)
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `dark_theme` | Boolean | true | Dark mode |
+| `vm_ram_mb` | Int | 512 | VM RAM (512/1024/2048/4096 MB) |
+| `vm_cpus` | Int | 1 | VM CPUs (1/2/4/6/8) |
+| `terminal_font_size` | Int | 20 | Font size (sp, raw — no scaledDensity) |
+| `terminal_color_theme` | String | "default" | Color scheme name (maps to assets/colors/*.properties) |
+| `terminal_font` | String | "default" | Font name (maps to assets/fonts/*.ttf) |
+| `storage_gb` | Int | 2 | Persistent storage size (GB) |
+| `storage_access_enabled` | Boolean | false | Downloads sharing via virtio-9p |
+| `setup_done` | Boolean | false | Initial setup completed |
+| `ssh_enabled` | Boolean | false | Dropbear SSH in VM |
+| `port_forwards` | Set\<String\> | {} | `"tcp:8080:80"` format |
+| `dismissed_update_version` | String | "" | Last dismissed update version |
+
+---
+
+## Port Forwarding
+
+```
+PortForwardRule(hostPort=8080, guestPort=80, protocol="tcp")
+Serialized as: "tcp:8080:80"
+```
+
+- **At boot**: passed as QEMU `-netdev user,hostfwd=tcp::8080-:80` args
+- **At runtime**: QMP `human-monitor-command hostfwd_add` / `hostfwd_remove`
+- **SSH preset**: always forwarded as `tcp::9922-:22` when `sshEnabled = true`
+- **Service presets** (SettingsScreen): Pi-hole (5300→53, 8080→80), Nginx (8080→80, 8443→443), Gitea (3000→3000, 2222→22), Grafana (3001→3000)
+- **Pi-hole DNS**: host port 5300 used because Android blocks ports < 1024
 
 ---
 
@@ -342,64 +465,81 @@ last three steps.
 
 | Permission | Purpose |
 |------------|---------|
-| INTERNET | SLIRP networking, QMP socket, GitHub API |
-| ACCESS_NETWORK_STATE | Get device IP |
-| WAKE_LOCK | Keep CPU awake during VM run |
-| VIBRATE | Terminal bell feedback |
-| FOREGROUND_SERVICE | Host QEMU process |
-| FOREGROUND_SERVICE_SPECIAL_USE | QEMU "emulation" subtype |
-| POST_NOTIFICATIONS | Android 13+ notification permission |
-| MANAGE_EXTERNAL_STORAGE | Downloads folder sharing via virtio-9p |
+| `INTERNET` | SLIRP, QMP socket, GitHub API |
+| `ACCESS_NETWORK_STATE` | Get device IP for display |
+| `WAKE_LOCK` | Keep CPU alive during VM |
+| `VIBRATE` | Terminal bell, haptic feedback |
+| `FOREGROUND_SERVICE` | Host QEMU process |
+| `FOREGROUND_SERVICE_SPECIAL_USE` | QEMU "emulation" subtype |
+| `POST_NOTIFICATIONS` | Android 13+ notification |
+| `MANAGE_EXTERNAL_STORAGE` | Downloads sharing via virtio-9p |
 
 ---
 
-## Design Patterns
+## Design Patterns & Quirks
 
-- **Single Activity:** Compose Navigation with NavHost
-- **Hilt:** Constructor injection, no @Provides needed
-- **DataStore:** Preferences DataStore for all settings
-- **StateFlow:** All UI state exposed as StateFlow
-- **Reflection:** `TerminalView.mTermSession` and `mEmulator` set directly via reflection
-- **Coroutines:** IO dispatcher for QEMU I/O, Main for UI updates
-- **Sealed Classes:** VmState for lifecycle states
-- **Persistence:** Two-layer (DataStore for config, ext4 image for VM data)
+### Architecture
+- **Single Activity**: Compose Navigation with NavHost
+- **TerminalViewModel scoped outside NavHost**: Survives navigation between screens; session persists
+- **Proxy sessionClient**: `proxySessionClient` in PodroidQemu delegates to `sessionClientDelegate`; lets session be pre-created at boot before UI attaches
+- **Reflection**: `TerminalView.mTermSession`, `mEmulator`, `TerminalEmulator.mCurrentDecSetFlags`, `mapDecSetBitToInternalBit` — all accessed reflectively (Termux AAR private fields)
+- **VmState flow**: Idle → Starting → Running → Stopped/Error; service/UI observe via StateFlow
+
+### Known Quirks
+- **QEMU + bridge packaged as `.so`**: ELF executables renamed to `.so` for APK packaging; `nativeLibraryDir` extraction still works
+- **libslirp soname patched**: `libslirp.so.0` → `libslirp.so` via patchelf (Android linker needs exact match)
+- **libtermux.so custom-built**: Termux prebuilt uses 4KB pages; rebuilt with `-Wl,-z,max-page-size=16384`
+- **Root project name is "VirtuDroid"**: In `settings.gradle.kts`
+- **Room declared but unused**: DataStore used instead
+- **Downloads sharing via 9p**: `msize=1048576,cache=loose,noatime` — 128× fewer round-trips vs default 8KB msize
+- **QEMU DNS forwarder (10.0.2.3) unreliable on Android**: init-podroid uses 8.8.8.8 + 1.1.1.1 directly
+- **No ICMP in SLIRP**: `ping` doesn't work inside VM (QEMU SLIRP limitation)
+- **forceUpdateSizeFromView must NOT multiply by scaledDensity**: TerminalView passes raw int textSize to Paint.setTextSize; our computation must match or TUI apps render in wrong grid
+- **Bridge stderr silenced**: bridge runs as TerminalSession subprocess, its stderr IS the PTY; any write would bleed into the terminal. Never add `fprintf(stderr, ...)` to podroid-bridge.c
+- **seenActive flag in PodroidService**: Prevents premature wakelock release on service start before VM reaches Running state
 
 ---
 
 ## Common Tasks Reference
 
-### Add a new setting
-1. Add key to `SettingsRepository.kt` (DataStore key + Flow)
-2. Add UI in `SettingsScreen.kt` (Slider/Switch/etc.)
-3. Add setter in `SettingsViewModel.kt`
+### Rebuild initramfs (init-podroid changed)
+```bash
+./build-all.sh initramfs && ./gradlew assembleDebug && adb uninstall com.excp.podroid.debug; adb install -r app/build/outputs/apk/debug/app-debug.apk
+```
 
-### Add a new port forward preset
+### Check VM console output
+```bash
+adb shell run-as com.excp.podroid.debug cat files/console.log
+```
+
+### Add a new boot stage
+1. Add `boot_stage "My stage..."` at correct position in `init-podroid`
+2. Add match in `PodroidQemu.detectBootStage()`
+3. Rebuild initramfs
+
+### Add a setting
+1. Add DataStore key + Flow in `SettingsRepository.kt`
+2. Add UI in `SettingsScreen.kt` (Slider/Switch)
+3. Add setter in `SettingsViewModel.kt`
+4. Pass to `PodroidQemu.start()` if VM-time setting
+
+### Add a port forward preset
 1. Add to `servicePresets` list in `SettingsScreen.kt`
 
-### Add a new boot stage detection
-1. Add case in `PodroidQemu.detectBootStage()`
+### Add terminal color theme
+1. Add `.properties` file to `app/src/main/assets/colors/`
+2. Appears automatically in QuickSettingsDrawer picker
+
+### Add terminal font
+1. Add `.ttf` to `app/src/main/assets/fonts/`
+2. Appears automatically in QuickSettingsDrawer picker
 
 ### Modify QEMU arguments
 1. Edit `PodroidQemu.buildCommand()`
 
-### Modify the terminal bridge
-1. Edit `podroid-bridge.c`
-2. Rebuild with `./build-qemu-android.sh` (bridge is compiled alongside QEMU)
-
-### Add a terminal color theme
-1. Add `.properties` file to `app/src/main/assets/colors/`
-2. Theme appears automatically in the Settings picker dialog
-
-### Add a terminal font
-1. Add `.ttf` file to `app/src/main/assets/fonts/`
-2. Font appears automatically in the Settings picker dialog
-
-### Add a new VM control signal (e.g. beyond RESIZE)
-1. Add a new message format to `podroid-bridge.c` (write to ctrl.sock)
-2. Add a new case to the resize daemon in `init-podroid` (read from `/dev/hvc0`)
-
-### Modify VM init sequence
-1. Edit `init-podroid` shell script
+### Add a new VM control channel message
+1. Add write to `ctrl.sock` in `podroid-bridge.c`
+2. Add handler in the resize daemon loop in `init-podroid` (reads from `/dev/hvc0`)
 
 ---
 
@@ -415,159 +555,31 @@ last three steps.
 | Hilt | 2.59.2 |
 | Coroutines | 1.9.0 |
 | DataStore | 1.2.1 |
-| Termux terminal | v0.118.1 |
+| Termux terminal-view | v0.118.1 (JitPack) |
 | Lifecycle | 2.9.0 |
 | Activity Compose | 1.10.1 |
-| Room | 2.8.4 (declared but **NOT USED**) |
-
-## Build Scripts
-
-### docker-build-initramfs.sh
-- Uses multi-stage Dockerfile
-- Downloads Alpine 3.23 aarch64 netboot + virt ISO
-- Installs packages via qemu-user-static on x86_64
-- Outputs: `app/src/main/assets/{vmlinuz-virt,initrd.img}` (~71MB)
-
-### build-qemu-android.sh
-- Reads `podroidQemuVersion` from `gradle.properties`
-- Builds via `Dockerfile.qemu`
-- Compiles podroid-bridge alongside QEMU
-- Outputs to `app/src/main/jniLibs/arm64-v8a/` and `app/src/main/assets/qemu/`
-
-### build-termux-android.sh
-- Clones Termux v0.118.1 from GitHub
-- Compiles `libtermux.so` with **16KB page alignment** (`-Wl,-z,max-page-size=16384`)
-- Verifies alignment via Python ELF parsing
-- Required because Android may use 16KB page devices
-
-## Dockerfile - VM Rootfs Packages
-
-Installed via `apk` in Alpine aarch64:
-```
-linux-virt, busybox, ttyd, podman, netavark, aardvark-dns,
-fuse-overlayfs, slirp4netns, shadow-uidmap, ca-certificates,
-crun, curl, e2fsprogs, util-linux, openrc, dropbear,
-ncurses-terminfo-base, musl-locales
-```
-
-## ProGuard Rules (app/proguard-rules.pro)
-
-Keeps Termux reflection targets:
-- `TerminalView.mTermSession` — set directly in TerminalScreen to wire the session
-- `TerminalView.mEmulator` — set directly in TerminalScreen to wire the display emulator
-
-## 16KB Page Alignment Requirement
-
-All native libs (QEMU, slirp, termux.so) must have `p_align >= 16384` in ELF headers. This is verified by Python scripts in the build scripts. Reason: some Android devices use 16KB system pages.
-
-## Terminal Resize Sequence
-
-When the view layout changes (keyboard open/close, rotation):
-1. `addOnLayoutChangeListener` calls `TerminalView.updateSize()` (uses renderer's exact font metrics)
-2. TerminalView calculates cols/rows, calls `TerminalSession.updateSize(cols, rows)`
-3. Termux JNI: `ioctl(pty_master_fd, TIOCSWINSZ)` → SIGWINCH to `podroid-bridge`
-4. Bridge: `ioctl(STDIN, TIOCGWINSZ)` → writes `RESIZE rows cols\n` to `ctrl.sock`
-5. VM daemon reads `/dev/hvc0` → `stty rows N cols M < /dev/ttyAMA0`
-6. Linux kernel sends SIGWINCH to the foreground process group of ttyAMA0
-
-No stdin injection. No debounce. nvim/htop/btop resize automatically.
-
-## Settings.gradle.kts
-
-- **Root project name:** `VirtuDroid`
-- **App module:** `:app`
-- **Repositories:** google, mavenCentral, **JitPack** (for Termux)
-- **Toolchain:** foojay-resolver-convention 1.0.0
-
-## Dockerfile.qemu - QEMU Build Details
-
-### Build Dependencies
-- NDK r27c (Android API 28) — QEMU builds against API 28 sysroot to avoid symbols not available in Android 9-11 (like copy_file_range)
-- Cross-compile from debian:bookworm
-- Dependencies: pcre2, libffi, glib 2.82.5, pixman 0.44.2, libattr, **libucontext**
-
-### libucontext Shim
-Android Bionic lacks proper `ucontext.h`. Built from [kaniini/libucontext](https://github.com/kaniini/libucontext). Provides `getcontext`, `swapcontext`, etc. A header shim remaps the standard functions to the libucontext versions.
-
-### QEMU Patches Applied
-1. **librt optional** — Bionic has librt functions in libc, not a separate library
-2. **memfd_create shim** — `qemu_shm_alloc` uses `syscall(__NR_memfd_create)` instead of `shm_open` (API 28+)
-3. **libattr stub** — `libattr = declare_dependency()` bypasses pkg-config detection (xattr in Bionic's libc)
-4. **st_\*_nsec undef** — Undefines `st_atime_nsec` etc. macros from Android's sys/stat.h that clash with 9p struct fields
-
-### QEMU Configure Flags
-```
---enable-tcg --enable-kvm --enable-system --enable-slirp --enable-virtfs --enable-pie
---disable-werror --disable-docs --disable-gtk --disable-sdl --disable-opengl --disable-vnc
---disable-capstone --disable-seccomp --disable-libiscsi --disable-libnfs --disable-libssh
---disable-curl --disable-spice --disable-vde --disable-linux-io-uring
---with-coroutine=ucontext  ← REQUIRED: PAC fix for Android 15+ on Tensor devices
-```
-
-### podroid-bridge Build (in Dockerfile.qemu)
-```
-${CC} ${CFLAGS} -fPIE -pie ${LDFLAGS} podroid-bridge.c -o podroid-bridge
-cp podroid-bridge libpodroid-bridge.so
-```
-Same NDK, same CFLAGS/LDFLAGS (16KB page alignment enforced). Outputs `libpodroid-bridge.so`.
-
-### podroid-bridge Responsibilities
-- Connect to `serial.sock` (QEMU serial unix socket)
-- Allocate PTY via `forkpty()` (Termux provides the PTY master)
-- Set `cfmakeraw()` on PTY slave (VM's getty handles echo/line editing)
-- Relay bidirectionally: PTY ↔ serial.sock
-- No filtering — all escape sequences pass through unmodified
-- On SIGWINCH: read PTY size via `TIOCGWINSZ`, write `RESIZE rows cols\n` to `ctrl.sock`
-
-### PAC (Pointer Authentication) Fix
-Android 15+ on Pixel (Tensor) uses ARMv9.2 with PAC. Default QEMU sigaltstack coroutine calls `siglongjmp` across alternate signal stacks — this fails PAC validation and raises SIGILL. Fix: `--with-coroutine=ucontext` uses `swapcontext` instead.
-
-### Output Artifacts
-```
-app/src/main/jniLibs/arm64-v8a/
-├── libqemu-system-aarch64.so  # QEMU binary renamed to .so for APK packaging
-├── libslirp.so                # SLIRP networking (soname patched from .so.0)
-└── libpodroid-bridge.so       # Terminal bridge binary renamed to .so for APK packaging
-
-app/src/main/assets/qemu/
-├── efi-virtio.rom             # VirtIO EFI ROM
-└── keymaps/                   # QEMU keyboard maps
-```
-
-### 16KB Page Alignment
-All artifacts must have `p_align >= 16384`. Enforced via `LDFLAGS=-Wl,-z,max-page-size=16384` in both NDK toolchain and QEMU link step. Verified by Python ELF parser in build script.
-
-## test-deploy.sh
-
-Automated build → install → boot test script:
-1. Check ADB device connected
-2. Optionally rebuild initramfs
-3. Build debug APK with Gradle
-4. Install via `adb install -r`
-5. Force stop app + delete `storage.img` (clean state)
-6. Launch app via `am start`
-7. Wait for user to press "Start VM"
-8. Poll `console.log` for boot completion (timeout 60s)
-9. Run validation checks (banner, IP, persistent, internet, Ready!, kernel modules, network)
-10. Detect kernel panics/crashes
-
-## Known Quirks
-
-- **Room declared but unused** — DataStore is used for persistence instead
-- **KSP version differs from Kotlin** — Kotlin 2.2.21, KSP 2.3.6
-- **QEMU packaged as `.so`** — Actually an ELF executable renamed from binary to `.so` for Android packaging
-- **podroid-bridge packaged as `.so`** — Same trick: PIE executable renamed to `.so` for APK extraction
-- **Project name in Gradle is "VirtuDroid"** — `rootProject.name` in settings.gradle.kts
-- **SLIRP soname patched** — `libslirp.so.0` → `libslirp.so` via patchelf for APK compatibility
-- **libtermux.so custom-built** — Termux's prebuilt uses 4KB pages; rebuilt with 16KB alignment via `build-termux-android.sh`
-- **Boot monitor connects to serial.sock first** — PodroidQemu reads boot output from serial.sock until "Ready", then `releaseSerial()` uses `shutdownInput()`+`close()` to interrupt blocking read; bridge has 50-retry connect loop as defense in depth
-- **releaseSerial() sets bootStage="Ready"** — With persistent overlay the VM boots faster than the boot monitor can detect boot completion strings; `releaseSerial()` unconditionally marks boot as "Ready" when the terminal takes over
-- **Some tui apps hangs on Podroid** — Works inside tmux or by using SSH .
-
-## GitHub
-
-- **Repo:** github.com/ExTV/Podroid
-- **Releases API:** https://api.github.com/repos/ExTV/Podroid/releases/latest
-- **Update check:** `UpdateRepository.checkForUpdate()` compares tag_name vs BuildConfig.VERSION_NAME
+| WindowSizeClass | material3-adaptive (Compose BOM) |
+| Room | 2.8.4 (declared, NOT used) |
 
 ---
+
+## ProGuard
+
+`app/proguard-rules.pro` keeps Termux reflection targets:
+- `TerminalView.mTermSession`
+- `TerminalView.mEmulator`
+
+---
+
+## Pending Work (as of 2026-04-22)
+
+### Next Feature: Container Hub
+Full container management screen — SSH into VM at `127.0.0.1:9922`, run `podman ps`, one-tap deploy from a catalog of services (Pi-hole, Vaultwarden, code-server, Gitea, Jellyfin, Uptime Kuma, Filebrowser, Nginx, Grafana). Requires JSch dependency.
+
+### Other TODOs
+- **OpenRC integration**: Replace manual init-podroid boot with proper OpenRC service scripts (fixes `rc-service` and docker socket compatibility)
+- **Pin Dockerfile packages**: Add version pins to prevent reproducibility breaks
+- **DNS configurable**: Currently hardcoded 8.8.8.8 + 1.1.1.1; add settings UI
+- **Overlay mount validation**: Detect and surface overlay failures with actionable error
+- **Terminal title → TopAppBar**: Wire `onTitleChanged()` to update app bar from OSC sequences
+- **Custom font loading**: Allow users to load their own .ttf files (GitHub issue #5)
