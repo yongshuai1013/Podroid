@@ -43,7 +43,6 @@ Podroid spins up a lightweight Alpine Linux VM using QEMU and gives you a fully 
 
 ### Networking
 - **Port Forwarding** — Expose VM services to your Android device via runtime QMP control
-- **Service Presets** — One-tap setup for Pi-hole, Nginx, Gitea, Grafana, and more
 - **Built-in SSH** — Dropbear server running on port 9922
 
 ### Performance
