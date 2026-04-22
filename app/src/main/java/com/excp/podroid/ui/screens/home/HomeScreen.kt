@@ -24,7 +24,6 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
@@ -34,6 +33,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.windowsizeclass.WindowSizeClass
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
@@ -46,10 +46,12 @@ import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.excp.podroid.BuildConfig
 import com.excp.podroid.engine.VmState
+import com.excp.podroid.ui.components.AdaptiveContainer
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun HomeScreen(
+    windowSizeClass: WindowSizeClass,
     onNavigateToTerminal: () -> Unit,
     onNavigateToSettings: () -> Unit,
     viewModel: HomeViewModel = hiltViewModel(),
@@ -99,24 +101,32 @@ fun HomeScreen(
             )
         },
     ) { innerPadding ->
-        Column(
+        AdaptiveContainer(
+            windowSizeClass = windowSizeClass,
             modifier = Modifier
                 .fillMaxSize()
                 .padding(innerPadding)
-                .padding(horizontal = 24.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(20.dp),
         ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(horizontal = 24.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(20.dp),
+            ) {
             Spacer(modifier = Modifier.height(24.dp))
 
-            // Status icon
+            // Animated boot progress replaces the plain CircularProgressIndicator
+            // Visible only while boot is starting to keep existing VM/state logic intact
             Box(modifier = Modifier.size(72.dp), contentAlignment = Alignment.Center) {
-                when {
-                    isStarting -> CircularProgressIndicator(
-                        modifier = Modifier.size(72.dp),
-                        strokeWidth = 5.dp,
+                if (isStarting) {
+                    // Custom animated boot progress
+                    com.excp.podroid.ui.screens.home.AnimatedBootProgress(
+                        bootStage = bootStage,
+                        modifier = Modifier.size(72.dp)
                     )
-                    else -> Icon(
+                } else {
+                    Icon(
                         imageVector = Icons.Default.Terminal,
                         contentDescription = null,
                         modifier = Modifier.size(72.dp),
@@ -256,6 +266,7 @@ fun HomeScreen(
             )
 
             Spacer(Modifier.height(8.dp))
+            }
         }
     }
 }
