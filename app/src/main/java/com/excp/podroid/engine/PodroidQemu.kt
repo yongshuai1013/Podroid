@@ -80,28 +80,114 @@ class PodroidQemu @Inject constructor(
     private val maxConsoleSize = 64 * 1024
 
     /**
+     * Proxy TerminalSessionClient — delegates to whatever real client is set.
+     * Lets us create the bridge session at boot-complete time (before the
+     * terminal UI exists) and plug in the real ViewModel client later.
+     */
+    @Volatile
+    var sessionClientDelegate: TerminalSessionClient? = null
+
+    private val proxySessionClient = object : TerminalSessionClient {
+        override fun onTextChanged(s: TerminalSession) { sessionClientDelegate?.onTextChanged(s) }
+        override fun onTitleChanged(s: TerminalSession) { sessionClientDelegate?.onTitleChanged(s) }
+        override fun onSessionFinished(s: TerminalSession) { sessionClientDelegate?.onSessionFinished(s) }
+        override fun onCopyTextToClipboard(s: TerminalSession, text: String?) { sessionClientDelegate?.onCopyTextToClipboard(s, text) }
+        override fun onPasteTextFromClipboard(s: TerminalSession?) { sessionClientDelegate?.onPasteTextFromClipboard(s) }
+        override fun onBell(s: TerminalSession) { sessionClientDelegate?.onBell(s) }
+        override fun onColorsChanged(s: TerminalSession) { sessionClientDelegate?.onColorsChanged(s) }
+        override fun onTerminalCursorStateChange(state: Boolean) { sessionClientDelegate?.onTerminalCursorStateChange(state) }
+        override fun getTerminalCursorStyle(): Int = sessionClientDelegate?.terminalCursorStyle ?: 0
+        override fun logError(tag: String?, msg: String?) { Log.e(tag ?: TAG, msg ?: "") }
+        override fun logWarn(tag: String?, msg: String?) { Log.w(tag ?: TAG, msg ?: "") }
+        override fun logInfo(tag: String?, msg: String?) { Log.i(tag ?: TAG, msg ?: "") }
+        override fun logDebug(tag: String?, msg: String?) { Log.d(tag ?: TAG, msg ?: "") }
+        override fun logVerbose(tag: String?, msg: String?) { Log.v(tag ?: TAG, msg ?: "") }
+        override fun logStackTraceWithMessage(tag: String?, msg: String?, e: Exception?) { Log.e(tag ?: TAG, msg, e) }
+        override fun logStackTrace(tag: String?, e: Exception?) { Log.e(tag ?: TAG, "Stack trace", e) }
+    }
+
+    /**
      * Release the boot-monitoring serial connection so podroid-bridge can connect.
-     * Called by TerminalViewModel right before starting the bridge TerminalSession.
      */
     fun releaseSerial() {
-        _bootStage.value = "Ready"
-        val sock = bootSocket
+        val sock = bootSocket ?: return
+        Log.d(TAG, "Releasing boot monitor socket")
         bootSocket = null
-        if (sock != null) {
-            try { sock.shutdownInput() } catch (_: Exception) {}
-            try { sock.shutdownOutput() } catch (_: Exception) {}
-            try { sock.close() } catch (_: Exception) {}
+        try {
+            // Signal EOF to the monitor loop
+            sock.shutdownInput()
+            sock.shutdownOutput()
+            sock.close()
+        } catch (e: Exception) {
+            Log.w(TAG, "Error closing boot socket: ${e.message}")
+        }
+    }
+
+    /**
+     * Replay the portion of boot serial output that arrived after "Ready!" into
+     * a freshly created terminal emulator.
+     */
+    private fun replayBootOutput(sess: TerminalSession) {
+        val console = _consoleText.value
+        val readyIdx = console.indexOf("Ready!")
+        if (readyIdx < 0) return
+        val lineEnd = console.indexOf('\n', readyIdx)
+        if (lineEnd < 0) return
+        val postReady = console.substring(lineEnd + 1)
+        if (postReady.isEmpty()) return
+        val bytes = postReady.toByteArray(Charsets.UTF_8)
+        try {
+            sess.emulator?.append(bytes, bytes.size)
+            Log.d(TAG, "Replayed ${bytes.size}B of post-Ready output to emulator")
+        } catch (e: Exception) {
+            Log.w(TAG, "Could not replay boot output: ${e.message}")
+        }
+    }
+
+    private fun autoStartBridge() {
+        android.os.Handler(android.os.Looper.getMainLooper()).post {
+            if (_terminalSession != null) return@post
+            if (_state.value !is VmState.Running && _state.value !is VmState.Starting) return@post
+            
+            // Release the boot monitor connection.
+            releaseSerial()
+
+            // IMPORTANT: QEMU serial socket ('server,nowait') takes a beat to
+            // re-listen after a client disconnects. If the bridge tries to
+            // connect immediately, it may hit ECONNREFUSED.
+            android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                if (_terminalSession != null) return@postDelayed
+                val bridgeExe = File(context.applicationInfo.nativeLibraryDir, "libpodroid-bridge.so")
+                if (!bridgeExe.exists()) return@postDelayed
+
+                val sess = TerminalSession(
+                    bridgeExe.absolutePath,
+                    context.filesDir.absolutePath,
+                    arrayOf(bridgeExe.absolutePath, serialSockPath, ctrlSockPath),
+                    null,
+                    2000,
+                    proxySessionClient,
+                )
+                sess.updateSize(80, 24)
+                replayBootOutput(sess)
+                _terminalSession = sess
+                _terminalSessionAttached = false
+                Log.d(TAG, "Bridge auto-started (after 500ms delay)")
+            }, 500)
         }
     }
 
     fun createTerminalSession(client: TerminalSessionClient): TerminalSession {
-        if (_terminalSession != null && _terminalSessionAttached) {
+        sessionClientDelegate = client
+
+        // Session already auto-started during boot — just return it
+        if (_terminalSession != null) {
+            _terminalSessionAttached = true
+            Log.d(TAG, "Returning pre-started terminal session")
             return _terminalSession!!
         }
 
-        // Release the boot monitor connection so QEMU re-listens on serial.sock.
-        // No sleep needed — podroid-bridge has its own connect retry loop
-        // (50 × 200ms = up to 10s), so the handoff is race-free.
+        // Fallback: create session now (boot monitor may not have auto-started it)
         releaseSerial()
 
         val bridgeExe = File(context.applicationInfo.nativeLibraryDir, "libpodroid-bridge.so")
@@ -115,10 +201,11 @@ class PodroidQemu @Inject constructor(
             arrayOf(bridgeExe.absolutePath, serialSockPath, ctrlSockPath),
             null,
             2000,
-            client,
+            proxySessionClient,
         )
 
         sess.updateSize(80, 24)
+        replayBootOutput(sess)
 
         _terminalSession = sess
         _terminalSessionAttached = true
@@ -197,6 +284,7 @@ class PodroidQemu @Inject constructor(
 
             val startMs = System.currentTimeMillis()
             val timeoutMs = 10_000L
+            var socketsReady = false
             while (System.currentTimeMillis() - startMs < timeoutMs) {
                 if (!proc.isAlive) {
                     val exitCode = proc.exitValue()
@@ -206,24 +294,26 @@ class PodroidQemu @Inject constructor(
                     return
                 }
                 if (File(serialSockPath).exists() && File(qmpSocketPath).exists()) {
-                    Log.d(TAG, "QEMU is running (sockets ready after ${System.currentTimeMillis() - startMs}ms)")
-                    _state.value = VmState.Running
+                    Log.d(TAG, "QEMU sockets ready after ${System.currentTimeMillis() - startMs}ms")
+                    socketsReady = true
                     break
                 }
                 Thread.sleep(200)
             }
-            if (_state.value != VmState.Running) {
+            if (!socketsReady) {
                 Log.e(TAG, "Socket timeout — QEMU sockets not ready after ${timeoutMs}ms")
                 proc.destroyForcibly()
                 throw RuntimeException("QEMU failed to create sockets within ${timeoutMs / 1000}s")
             }
 
-
+            // State stays Starting — boot monitor will set Running when "Ready!" is detected
             scope.launch {
                 delay(60_000)
-                if (_bootStage.value != "Ready") {
-                    Log.w(TAG, "Boot stage fallback: ${_bootStage.value} → Ready (timeout)")
+                if (_state.value is VmState.Starting) {
+                    Log.w(TAG, "Boot timeout fallback → forcing Running state")
                     _bootStage.value = "Ready"
+                    _state.value = VmState.Running
+                    autoStartBridge()
                 }
             }
 
@@ -316,24 +406,18 @@ class PodroidQemu @Inject constructor(
 
     private fun detectBootStage(text: String) {
         when {
-            "podman run" in text || "Ready!" in text ->
+            text.contains("Ready!") -> {
                 _bootStage.value = "Ready"
-            "internet " in text || "Internet:" in text ->
-                _bootStage.value = "Almost ready..."
-            "Starting SSH" in text ->
-                _bootStage.value = "Starting SSH..."
-            "Found" in text && "eth" in text ->
-                _bootStage.value = "Network found"
-            "Waiting for network" in text ->
-                _bootStage.value = "Waiting for network..."
-            "Configuring containers" in text ->
-                _bootStage.value = "Configuring containers..."
-            "Loading kernel modules" in text ->
-                _bootStage.value = "Loading kernel modules..."
-            "overlay" in text ->
-                _bootStage.value = "Setting up overlay..."
-            "Mounting persistent" in text || "Formatting" in text ->
-                _bootStage.value = "Mounting storage..."
+                _state.value = VmState.Running
+                autoStartBridge()
+            }
+            text.contains("Almost ready") -> _bootStage.value = "Almost ready..."
+            text.contains("Starting SSH") -> _bootStage.value = "Starting SSH..."
+            text.contains("Configuring containers") -> _bootStage.value = "Configuring containers..."
+            text.contains("Network found") -> _bootStage.value = "Network found"
+            text.contains("Loading kernel modules") -> _bootStage.value = "Loading kernel modules..."
+            text.contains("Mounting storage") -> _bootStage.value = "Mounting storage..."
+            text.contains("Booting kernel") -> _bootStage.value = "Booting kernel..."
         }
     }
 
@@ -360,8 +444,10 @@ class PodroidQemu @Inject constructor(
         ioScope?.cancel()
         ioScope = null
         process = null
+        _terminalSession?.finishIfRunning()
         _terminalSession = null
         _terminalSessionAttached = false
+        sessionClientDelegate = null
         consoleBuilder.clear()
         _consoleText.value = ""
         File(serialSockPath).delete()
@@ -439,15 +525,12 @@ class PodroidQemu @Inject constructor(
             }
         }
         args += "-netdev"; args += netdevArg
-        args += "-device"; args += "virtio-net,netdev=net0"
+        args += "-device"; args += "virtio-net-pci,netdev=net0,romfile="
 
         // ── Serial console (ttyAMA0) → unix socket for podroid-bridge ─────────
         args += "-serial"; args += "unix:$serialSockPath,server,nowait"
 
         // ── Control channel (hvc0) → unix socket for resize signalling ────────
-        // VM daemon reads "RESIZE rows cols\n" from /dev/hvc0 and calls stty
-        // on ttyAMA0 — Linux kernel automatically sends SIGWINCH to the foreground
-        // process group.
         args += "-chardev"; args += "socket,id=ctrl0,path=$ctrlSockPath,server=on,wait=off"
         args += "-device";  args += "virtio-serial-pci"
         args += "-device";  args += "virtconsole,chardev=ctrl0,name=org.podroid.ctrl"
