@@ -30,6 +30,9 @@ import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
 import android.util.Log
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import com.termux.terminal.TerminalColors
 import android.view.KeyEvent
 import android.view.MotionEvent
@@ -38,6 +41,7 @@ import androidx.lifecycle.viewModelScope
 import com.excp.podroid.data.repository.SettingsRepository
 import com.excp.podroid.engine.PodroidQemu
 import com.excp.podroid.engine.VmState
+import com.termux.terminal.TerminalEmulator
 import com.termux.terminal.TerminalSession
 import com.termux.terminal.TerminalSessionClient
 import com.termux.view.TerminalView
@@ -45,6 +49,7 @@ import com.termux.view.TerminalViewClient
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.stateIn
 import java.io.File
@@ -54,7 +59,7 @@ import javax.inject.Inject
 class TerminalViewModel @Inject constructor(
     @ApplicationContext private val context: Context,
     private val qemu: PodroidQemu,
-    settingsRepository: SettingsRepository,
+    private val settingsRepository: SettingsRepository,
 ) : ViewModel() {
 
     val vmState: StateFlow<VmState> = qemu.state
@@ -68,17 +73,113 @@ class TerminalViewModel @Inject constructor(
     val terminalFont: StateFlow<String> = settingsRepository.terminalFont
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), "default")
 
+    // Quick-UI state (non-persistent for now)
+    var showExtraKeys by mutableStateOf(true)
+        private set
+
+    var hapticsEnabled by mutableStateOf(true)
+        private set
+
+    // Trigger for opening the Quick Settings drawer (composable-side reacts via StateFlow)
+    private val _showQuickSettings = kotlinx.coroutines.flow.MutableStateFlow(false)
+    val showQuickSettings = _showQuickSettings
+
+    // Quick settings helpers (non-persistent)
+    fun openQuickSettings() { _showQuickSettings.value = true }
+    fun closeQuickSettings() {
+        _showQuickSettings.value = false
+        // Push the final terminal size now that settings are committed.
+        // Covers the case where rapid slider drags sent stale intermediate sizes to the VM.
+        pushSizeNow()
+    }
+
     /**
-     * Forces recreation of the terminal view on next call.
-     * Call when theme/font/size settings change.
+     * Re-push the current cols/rows to the session and VM resize daemon.
+     * Call after any setting that changes character cell dimensions.
      */
-    fun invalidateTerminalView() {
-        terminalView = null
+    fun pushSizeNow() {
+        val v = terminalView ?: return
+        v.post {
+            v.updateSize()
+            v.onScreenUpdated()
+        }
+        v.postDelayed({ v.updateSize() }, 300)
+        v.postDelayed({ v.updateSize() }, 800)
+    }
+
+    fun updateShowExtraKeys(value: Boolean) { showExtraKeys = value }
+    fun updateHapticsEnabled(value: Boolean) { hapticsEnabled = value }
+
+    fun setTerminalFontSize(value: Int) {
+        viewModelScope.launch {
+            settingsRepository.setTerminalFontSize(value)
+        }
+    }
+
+    fun setTerminalColorTheme(value: String) {
+        viewModelScope.launch {
+            settingsRepository.setTerminalColorTheme(value)
+            copyColorThemeToFilesDirAndApply(value)
+        }
+    }
+
+    fun setTerminalFont(value: String) {
+        viewModelScope.launch {
+            settingsRepository.setTerminalFont(value)
+            copyFontToFilesDirAndApply(value)
+        }
+    }
+    
+    private suspend fun copyColorThemeToFilesDirAndApply(theme: String) {
+        val colorFile = java.io.File(context.filesDir, "colors.properties")
+        var bgColor = android.graphics.Color.BLACK
+        if (theme == "default") {
+            colorFile.delete()
+        } else {
+            try {
+                val bytes = context.assets.open("colors/$theme.properties").use { it.readBytes() }
+                val props = java.util.Properties()
+                props.load(bytes.inputStream())
+                TerminalColors.COLOR_SCHEME.updateWith(props)
+                val bgHex = props["background"] as? String
+                bgColor = bgHex?.let { parseColor(it) } ?: android.graphics.Color.BLACK
+                colorFile.writeBytes(bytes)
+            } catch (_: Exception) {
+                colorFile.delete()
+            }
+        }
+        terminalView?.setBackgroundColor(bgColor)
+    }
+    
+    private suspend fun copyFontToFilesDirAndApply(font: String) {
+        val fontFile = java.io.File(context.filesDir, "font.ttf")
+        var typeface: Typeface = Typeface.MONOSPACE
+        if (font == "default") {
+            fontFile.delete()
+        } else {
+            try {
+                context.assets.open("fonts/$font.ttf").use { inp ->
+                    fontFile.outputStream().use { out -> inp.copyTo(out) }
+                }
+                typeface = Typeface.createFromFile(fontFile)
+            } catch (_: Exception) {
+                fontFile.delete()
+            }
+        }
+        currentTypeface = typeface
+        terminalView?.setTypeface(typeface)
+        terminalView?.let { v ->
+            v.post { forceUpdateSizeFromView(v); v.updateSize() }
+            v.postDelayed({ v.updateSize() }, 400)
+        }
     }
 
     @SuppressLint("StaticFieldLeak") // created once per ViewModel lifetime; ViewModel is nav-scoped
     private var terminalView: TerminalView? = null
     private var attached = false
+
+    // Tracks the active terminal typeface so forceUpdateSizeFromView uses correct char metrics.
+    private var currentTypeface: Typeface = Typeface.MONOSPACE
 
     fun getOrCreateTerminalView(): TerminalView {
         Log.d(TAG, "getOrCreateTerminalView called, current view: $terminalView, this: ${System.identityHashCode(this)}")
@@ -101,15 +202,24 @@ class TerminalViewModel @Inject constructor(
         val typeface = if (fontFile.exists()) {
             try { Typeface.createFromFile(fontFile) } catch (_: Exception) { Typeface.MONOSPACE }
         } else { Typeface.MONOSPACE }
+        currentTypeface = typeface
 
         val view = TerminalView(context, null).apply {
             setBackgroundColor(bgColor)
             setTextSize(terminalFontSize.value)
             setTypeface(typeface)
+            setTerminalViewClient(viewClient)
             keepScreenOn = true
             isFocusable = true
             isFocusableInTouchMode = true
         }
+
+        // Reattach existing session to new view
+        session?.let { sess ->
+            view.mTermSession = sess
+            view.mEmulator = sess.emulator
+        }
+
         terminalView = view
         return view
     }
@@ -171,10 +281,16 @@ class TerminalViewModel @Inject constructor(
         override fun onPasteTextFromClipboard(session: TerminalSession?) {
             val cb = context.getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
             val text = cb.primaryClip?.getItemAt(0)?.coerceToText(context)?.toString() ?: return
-            session?.write(text)
+            // Route through TerminalEmulator.paste() — it wraps in CSI 200~ / 201~
+            // when bracketed-paste mode is on (nvim, bash) and sends raw otherwise.
+            // Fall back to raw write if the emulator isn't ready yet.
+            val emu = session?.emulator
+            if (emu != null) emu.paste(text) else session?.write(text)
         }
         override fun onBell(session: TerminalSession) {
-            vibrator.vibrate(VibrationEffect.createOneShot(50, VibrationEffect.DEFAULT_AMPLITUDE))
+            if (hapticsEnabled) {
+                vibrator.vibrate(VibrationEffect.createOneShot(50, VibrationEffect.DEFAULT_AMPLITUDE))
+            }
         }
         override fun onColorsChanged(session: TerminalSession) {}
         override fun onTerminalCursorStateChange(state: Boolean) {}
@@ -209,18 +325,29 @@ class TerminalViewModel @Inject constructor(
 
         override fun onKeyDown(keyCode: Int, e: KeyEvent?, session: TerminalSession?): Boolean {
             if (e == null) return false
+            val shift = e.isShiftPressed
+            val ctrl = e.isCtrlPressed || extraCtrl
+            val alt = e.isAltPressed || extraAlt
+            // xterm CSI modifier: 1=none, 2=shift, 3=alt, 4=shift+alt, 5=ctrl,
+            // 6=ctrl+shift, 7=ctrl+alt, 8=all. Used for "ESC [1;<m><final>".
+            val mod = 1 + (if (shift) 1 else 0) + (if (alt) 2 else 0) + (if (ctrl) 4 else 0)
+            fun arrow(final: Char): ByteArray =
+                if (mod == 1) "\u001b[$final".toByteArray()
+                else "\u001b[1;$mod$final".toByteArray()
+
             val bytes = when (keyCode) {
                 KeyEvent.KEYCODE_ENTER        -> byteArrayOf(13)
                 KeyEvent.KEYCODE_DEL          -> byteArrayOf(127)
                 KeyEvent.KEYCODE_FORWARD_DEL  -> "\u001b[3~".toByteArray()
-                KeyEvent.KEYCODE_TAB          -> byteArrayOf(9)
+                KeyEvent.KEYCODE_TAB          ->
+                    if (shift) "\u001b[Z".toByteArray() else byteArrayOf(9)
                 KeyEvent.KEYCODE_ESCAPE       -> byteArrayOf(27)
-                KeyEvent.KEYCODE_DPAD_UP      -> "\u001b[A".toByteArray()
-                KeyEvent.KEYCODE_DPAD_DOWN    -> "\u001b[B".toByteArray()
-                KeyEvent.KEYCODE_DPAD_RIGHT   -> "\u001b[C".toByteArray()
-                KeyEvent.KEYCODE_DPAD_LEFT    -> "\u001b[D".toByteArray()
-                KeyEvent.KEYCODE_MOVE_HOME    -> "\u001b[H".toByteArray()
-                KeyEvent.KEYCODE_MOVE_END     -> "\u001b[F".toByteArray()
+                KeyEvent.KEYCODE_DPAD_UP      -> arrow('A')
+                KeyEvent.KEYCODE_DPAD_DOWN    -> arrow('B')
+                KeyEvent.KEYCODE_DPAD_RIGHT   -> arrow('C')
+                KeyEvent.KEYCODE_DPAD_LEFT    -> arrow('D')
+                KeyEvent.KEYCODE_MOVE_HOME    -> arrow('H')
+                KeyEvent.KEYCODE_MOVE_END     -> arrow('F')
                 KeyEvent.KEYCODE_PAGE_UP      -> "\u001b[5~".toByteArray()
                 KeyEvent.KEYCODE_PAGE_DOWN    -> "\u001b[6~".toByteArray()
                 KeyEvent.KEYCODE_INSERT       -> "\u001b[2~".toByteArray()
@@ -240,6 +367,7 @@ class TerminalViewModel @Inject constructor(
             }
             if (bytes != null) {
                 session?.write(bytes, 0, bytes.size)
+                if (mod != 1) { extraCtrl = false; extraAlt = false }
                 return true
             }
             return false
@@ -314,6 +442,73 @@ class TerminalViewModel @Inject constructor(
     fun updateSize(cols: Int, rows: Int) {
         session?.updateSize(cols, rows)
     }
+
+    /**
+     * Compute cols/rows from view pixel dimensions + paint metrics and push
+     * directly to the session, bypassing TerminalView.updateSize() which depends
+     * on mRenderer being lazily initialized during the first draw. When the
+     * session is attached before first paint, updateSize() computes zero sizes,
+     * leaves the emulator at the initial 80x24 default, and TUI apps render
+     * into the wrong grid (visible symptom: btop draws in the top-left only,
+     * because the emulator is larger than the visible viewport).
+     */
+    fun forceUpdateSizeFromView(view: TerminalView) {
+        val sess = session ?: return
+        val w = view.width
+        val h = view.height
+        if (w <= 0 || h <= 0) {
+            Log.d(TAG, "forceUpdateSize: view not measured yet (${w}x${h})")
+            return
+        }
+        // Use the same typeface + raw pixel size as TerminalView.setTextSize(int) —
+        // which passes the int straight to Paint.setTextSize() without scaledDensity.
+        // Must use currentTypeface (not Typeface.MONOSPACE) so that custom fonts
+        // (JetBrains Mono, Fira Code, etc.) with different cell metrics produce the
+        // correct cols/rows — otherwise TUI apps render in the wrong grid area.
+        val paint = android.graphics.Paint().apply {
+            typeface = currentTypeface
+            textSize = terminalFontSize.value.toFloat()
+            isAntiAlias = true
+        }
+        val charWidth = paint.measureText("M").coerceAtLeast(1f)
+        val fm = paint.fontMetrics
+        val lineHeight = (fm.descent - fm.ascent + fm.leading).coerceAtLeast(1f)
+        val cols = (w / charWidth).toInt().coerceAtLeast(20)
+        val rows = (h / lineHeight).toInt().coerceAtLeast(8)
+        Log.d(TAG, "forceUpdateSize: view=${w}x${h}px cell=${charWidth}x${lineHeight}px → ${cols}x${rows} chars")
+        sess.updateSize(cols, rows)
+    }
+
+    /**
+     * Emit xterm focus-in/out (CSI I / CSI O) when the app gains/loses focus.
+     * nvim's `FocusGained` / `FocusLost` autocommands rely on these. DECSET 1004
+     * (`DECSET_BIT_SEND_FOCUS_EVENTS`) and `isDecsetInternalBitSet` are private
+     * in the Termux AAR, so we read the `mCurrentDecSetFlags` field reflectively
+     * and mask with the known bit. If the reflection ever breaks we silently
+     * skip — sending focus bytes to a shell that didn't enable reporting would
+     * leak literal "^[[I" noise into the prompt.
+     */
+    fun sendFocusEvent(focused: Boolean) {
+        val sess = session ?: return
+        val emu = sess.emulator ?: return
+        if (!isFocusReportingEnabled(emu)) return
+        val seq = if (focused) "\u001b[I".toByteArray() else "\u001b[O".toByteArray()
+        sess.write(seq, 0, seq.size)
+    }
+
+    private fun isFocusReportingEnabled(emu: TerminalEmulator): Boolean = try {
+        val cls = TerminalEmulator::class.java
+        val flagsField = cls.getDeclaredField("mCurrentDecSetFlags").apply { isAccessible = true }
+        // Termux maps the public DECSET code 1004 via mapDecSetBitToInternalBit — we can't
+        // call that (package-private), so we derive the bit by setting 1004 through
+        // the public doDecSetOrReset path and observing the delta. Cheaper: invoke the
+        // package-private mapper reflectively.
+        val mapper = cls.getDeclaredMethod("mapDecSetBitToInternalBit", Int::class.javaPrimitiveType)
+            .apply { isAccessible = true }
+        val bit = mapper.invoke(null, 1004) as Int
+        val flags = flagsField.getInt(emu)
+        (flags and bit) != 0
+    } catch (_: Throwable) { false }
 
     fun sendExtraKey(key: String) {
         when (key) {
