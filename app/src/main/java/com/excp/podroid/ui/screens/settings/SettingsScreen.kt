@@ -1,6 +1,5 @@
 package com.excp.podroid.ui.screens.settings
 
-import android.content.res.AssetManager
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -13,8 +12,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
@@ -22,10 +19,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.RestartAlt
 import androidx.compose.material.icons.filled.Share
-import androidx.compose.material.icons.filled.TextFields
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -39,16 +34,15 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Slider
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.windowsizeclass.WindowSizeClass
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -64,28 +58,12 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.excp.podroid.BuildConfig
 import com.excp.podroid.data.repository.PortForwardRule
 import com.excp.podroid.engine.VmState
-import kotlinx.coroutines.launch
-
-private val storageSizes = listOf(2, 4, 8, 16, 32, 64)
-
-/** hostPort → guestPort, protocol ("tcp"/"udp"/"both") */
-private data class PortPreset(val name: String, val ports: List<Triple<Int, Int, String>>, val note: String? = null)
-
-private val servicePresets = listOf(
-    PortPreset("Pi-hole",
-        listOf(Triple(5300, 53, "both"), Triple(8080, 80, "tcp")),
-        "DNS on :5300 (Android blocks ports <1024 for apps)"),
-    PortPreset("Nginx",
-        listOf(Triple(8080, 80, "tcp"), Triple(8443, 443, "tcp"))),
-    PortPreset("Gitea",
-        listOf(Triple(3000, 3000, "tcp"), Triple(2222, 22, "tcp"))),
-    PortPreset("Grafana",
-        listOf(Triple(3001, 3000, "tcp"))),
-)
+import com.excp.podroid.ui.components.AdaptiveContainer
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SettingsScreen(
+    windowSizeClass: WindowSizeClass,
     onNavigateBack: () -> Unit,
     onThemeOrFontChanged: () -> Unit = {},
     viewModel: SettingsViewModel = hiltViewModel(),
@@ -95,16 +73,10 @@ fun SettingsScreen(
     val vmState by viewModel.vmState.collectAsStateWithLifecycle()
     val vmRamMb by viewModel.vmRamMb.collectAsStateWithLifecycle()
     val vmCpus by viewModel.vmCpus.collectAsStateWithLifecycle()
-    val terminalFontSize by viewModel.terminalFontSize.collectAsStateWithLifecycle()
-    val terminalColorTheme by viewModel.terminalColorTheme.collectAsStateWithLifecycle()
-    val terminalFont by viewModel.terminalFont.collectAsStateWithLifecycle()
     val storageSizeGb by viewModel.storageSizeGb.collectAsStateWithLifecycle()
     val sshEnabled by viewModel.sshEnabled.collectAsStateWithLifecycle(false)
     var showAddDialog by remember { mutableStateOf(false) }
     var showResetDialog by remember { mutableStateOf(false) }
-    var showColorThemeDialog by remember { mutableStateOf(false) }
-    var showFontDialog by remember { mutableStateOf(false) }
-    val scope = rememberCoroutineScope()
     val context = LocalContext.current
 
     val ramOptions = listOf(512, 1024, 2048, 4096)
@@ -123,64 +95,19 @@ fun SettingsScreen(
             )
         },
     ) { innerPadding ->
-        Column(
+        AdaptiveContainer(
+            windowSizeClass = windowSizeClass,
             modifier = Modifier
                 .fillMaxSize()
                 .padding(innerPadding)
-                .verticalScroll(rememberScrollState())
-                .padding(horizontal = 16.dp),
         ) {
-            Spacer(Modifier.height(8.dp))
-
-            // ── Terminal ─────────────────────────────────────────────
-            SettingsSectionHeader("Terminal")
-
-            Text(
-                text = "Font size: $terminalFontSize sp",
-                style = MaterialTheme.typography.bodyMedium,
-            )
-            Slider(
-                value = terminalFontSize.toFloat(),
-                onValueChange = { 
-                    viewModel.setTerminalFontSize(it.toInt())
-                    onThemeOrFontChanged()
-                },
-                valueRange = 12f..40f,
-                steps = 13,
-                modifier = Modifier.fillMaxWidth(),
-            )
-
-            Spacer(Modifier.height(8.dp))
-
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .verticalScroll(rememberScrollState())
+                    .padding(horizontal = 16.dp),
             ) {
-                FilledTonalButton(
-                    onClick = { showColorThemeDialog = true },
-                    enabled = vmNotRunning,
-                    modifier = Modifier.weight(1f),
-                ) {
-                    Icon(Icons.Default.Palette, contentDescription = null, modifier = Modifier.padding(end = 4.dp))
-                    Text(
-                        if (terminalColorTheme == "default") "Theme" else "Theme ✓",
-                        style = MaterialTheme.typography.labelMedium,
-                    )
-                }
-                FilledTonalButton(
-                    onClick = { showFontDialog = true },
-                    enabled = vmNotRunning,
-                    modifier = Modifier.weight(1f),
-                ) {
-                    Icon(Icons.Default.TextFields, contentDescription = null, modifier = Modifier.padding(end = 4.dp))
-                    Text(
-                        if (terminalFont == "default") "Font" else "Font ✓",
-                        style = MaterialTheme.typography.labelMedium,
-                    )
-                }
-            }
-
-            Spacer(Modifier.height(16.dp))
+            Spacer(Modifier.height(8.dp))
 
             // ── VM Resources ─────────────────────────────────────────
             SettingsSectionHeader("VM Resources")
@@ -301,38 +228,6 @@ fun SettingsScreen(
                 modifier = Modifier.padding(bottom = 8.dp),
             )
 
-            // Service presets
-            Text(
-                text = "Quick presets",
-                style = MaterialTheme.typography.labelMedium,
-                modifier = Modifier.padding(bottom = 4.dp),
-            )
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                servicePresets.forEach { preset ->
-                    FilterChip(
-                        selected = false,
-                        onClick = {
-                            preset.ports.forEach { (host, guest, proto) ->
-                                viewModel.addPortForward(host, guest, proto)
-                            }
-                        },
-                        label = { Text(preset.name, style = MaterialTheme.typography.labelSmall) },
-                        modifier = Modifier,
-                    )
-                }
-            }
-            if (servicePresets.any { it.note != null }) {
-                Text(
-                    text = "⚠ Android blocks apps from binding ports < 1024. Pi-hole DNS is mapped to :5300.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(top = 2.dp, bottom = 8.dp),
-                )
-            }
-
             if (portForwardRules.isEmpty()) {
                 Text(
                     text = "No rules configured.",
@@ -410,7 +305,7 @@ fun SettingsScreen(
             ) {
                 Icon(Icons.Default.RestartAlt, contentDescription = null)
                 Spacer(Modifier.width(8.dp))
-                Text("Reset VM Storage")
+                Text("Full App Reset")
             }
 
             if (!vmNotRunning) {
@@ -437,111 +332,7 @@ fun SettingsScreen(
             Spacer(Modifier.height(32.dp))
         }
     }
-
-    if (showColorThemeDialog) {
-        val themes: List<String> = remember {
-            listOf("default") + (context.assets.list("colors")?.toList()
-                ?.filter { it.endsWith(".properties") }
-                ?.mapNotNull { it?.removeSuffix(".properties") }
-                ?.sorted() ?: emptyList())
-        }
-        val currentTheme = terminalColorTheme
-        AlertDialog(
-            onDismissRequest = { showColorThemeDialog = false },
-            title = { Text("Color Theme") },
-            text = {
-                LazyColumn(modifier = Modifier.height(400.dp)) {
-                    items(themes) { theme: String ->
-                        val isSelected = theme == currentTheme
-                        Text(
-                            text = theme.replace('-', ' ').replaceFirstChar { it.uppercase() },
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clickable {
-                                    scope.launch {
-                                        if (theme == "default") {
-                                            java.io.File(context.filesDir, "colors.properties").delete()
-                                        } else {
-                                            context.assets.open("colors/$theme.properties").use { inp ->
-                                                java.io.File(context.filesDir, "colors.properties").outputStream()
-                                                    .use { out -> inp.copyTo(out) }
-                                            }
-                                        }
-                                        viewModel.setTerminalColorTheme(theme)
-                                        onThemeOrFontChanged()
-                                    }
-                                    showColorThemeDialog = false
-                                }
-                                .background(
-                                    if (isSelected) MaterialTheme.colorScheme.primaryContainer
-                                    else Color.Transparent
-                                )
-                                .padding(horizontal = 16.dp, vertical = 12.dp),
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = if (isSelected) MaterialTheme.colorScheme.onPrimaryContainer
-                                    else MaterialTheme.colorScheme.onSurface,
-                        )
-                    }
-                }
-            },
-            confirmButton = {
-                TextButton(onClick = { showColorThemeDialog = false }) { Text("Cancel") }
-            },
-        )
-    }
-
-    if (showFontDialog) {
-        val fonts: List<String> = remember {
-            listOf("default") + (context.assets.list("fonts")?.toList()
-                ?.filter { it.endsWith(".ttf") }
-                ?.mapNotNull { it?.removeSuffix(".ttf") }
-                ?.sorted() ?: emptyList())
-        }
-        val currentFont = terminalFont
-        AlertDialog(
-            onDismissRequest = { showFontDialog = false },
-            title = { Text("Terminal Font") },
-            text = {
-                LazyColumn(modifier = Modifier.height(400.dp)) {
-                    items(fonts) { font: String ->
-                        val isSelected = font == currentFont
-                        Text(
-                            text = font.replace('-', ' ').replaceFirstChar { it.uppercase() },
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clickable {
-                                    scope.launch {
-                                        if (font == "default") {
-                                            java.io.File(context.filesDir, "font.ttf").delete()
-                                        } else {
-                                            context.assets.open("fonts/$font.ttf").use { inp ->
-                                                java.io.File(context.filesDir, "font.ttf").outputStream()
-                                                    .use { out -> inp.copyTo(out) }
-                                            }
-                                        }
-                                        viewModel.setTerminalFont(font)
-                                        onThemeOrFontChanged()
-                                    }
-                                    showFontDialog = false
-                                }
-                                .background(
-                                    if (isSelected) MaterialTheme.colorScheme.primaryContainer
-                                    else Color.Transparent
-                                )
-                                .padding(horizontal = 16.dp, vertical = 12.dp),
-                            style = MaterialTheme.typography.bodyMedium,
-                            fontFamily = FontFamily.Monospace,
-                            color = if (isSelected) MaterialTheme.colorScheme.onPrimaryContainer
-                                    else MaterialTheme.colorScheme.onSurface,
-                        )
-                    }
-                }
-            },
-            confirmButton = {
-                TextButton(onClick = { showFontDialog = false }) { Text("Cancel") }
-            },
-        )
-    }
+}
 
     if (showAddDialog) {
         AddPortForwardDialog(
@@ -556,11 +347,12 @@ fun SettingsScreen(
     if (showResetDialog) {
         AlertDialog(
             onDismissRequest = { showResetDialog = false },
-            title = { Text("Reset VM storage?") },
+            title = { Text("Full App Reset?") },
             text = {
                 Text(
-                    "This permanently deletes all persistent data — installed packages, " +
-                    "container images, and files. The VM will start fresh on next boot."
+                    "This will clear ALL application data, including your VM storage, " +
+                    "settings, and port rules. The app will close and return to a " +
+                    "freshly-installed state."
                 )
             },
             confirmButton = {
@@ -568,7 +360,7 @@ fun SettingsScreen(
                     viewModel.resetVm()
                     showResetDialog = false
                 }) {
-                    Text("Reset", color = MaterialTheme.colorScheme.error)
+                    Text("Reset Everything", color = MaterialTheme.colorScheme.error)
                 }
             },
             dismissButton = {

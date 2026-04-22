@@ -131,9 +131,13 @@ class SettingsViewModel @Inject constructor(
     }
 
     fun resetVm() {
-        val storageFile = File(context.filesDir, "storage.img")
-        if (storageFile.exists()) {
-            storageFile.delete()
+        val activityManager = context.getSystemService(Context.ACTIVITY_SERVICE) as android.app.ActivityManager
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.KITKAT) {
+            activityManager.clearApplicationUserData()
+        } else {
+            // Fallback for extremely old devices (not applicable here but for completeness)
+            val storageFile = File(context.filesDir, "storage.img")
+            if (storageFile.exists()) storageFile.delete()
         }
     }
 
