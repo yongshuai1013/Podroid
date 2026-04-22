@@ -124,7 +124,7 @@ podman ps -a
 ### Prerequisites
 
 - Docker (for VM initramfs and QEMU builds)
-- Android NDK (for Termux terminal library)
+- Android NDK (for bridge/Termux native builds)
 - Android SDK
 
 ### Build Steps
@@ -134,20 +134,38 @@ podman ps -a
 git clone https://github.com/ExTV/Podroid.git
 cd Podroid
 
-# 1. Build VM initramfs and kernel
-./docker-build-initramfs.sh
+# 1. Build VM initramfs and kernel (~3min, cached after)
+./build-all.sh initramfs
 
-# 2. Build QEMU and terminal bridge
-./build-qemu-android.sh
+# 2. Build QEMU + bridge (~30min first time)
+./build-all.sh qemu
 
-# 3. Rebuild Termux terminal library with 16KB page alignment
-./build-termux-android.sh
+# 3. Build Termux JNI lib (local NDK)
+./build-all.sh termux
 
 # 4. Build the APK
 ./gradlew assembleDebug
 
 # 5. Install
+adb uninstall com.excp.podroid.debug
 adb install -r app/build/outputs/apk/debug/app-debug.apk
+
+# Fast bridge rebuild (without full Docker build)
+NDK=$HOME/Android/Sdk/ndk/$(ls ~/Android/Sdk/ndk/ | tail -1)
+CC=$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android28-clang
+$CC --sysroot=$NDK/toolchains/llvm/prebuilt/linux-x86_64/sysroot \
+    -target aarch64-linux-android28 -fPIE -pie -Wl,-z,max-page-size=16384 \
+    podroid-bridge.c -o app/src/main/jniLibs/arm64-v8a/libpodroid-bridge.so
+./gradlew :app:installDebug
+
+# Full rebuild + deploy
+./build-all.sh all
+```
+
+Alternatively, build everything at once:
+```bash
+./build-all.sh all
+./gradlew installDebug
 ```
 
 ---
@@ -165,10 +183,10 @@ Podroid/
 │       └── assets/               # VM kernel, initramfs, fonts, themes
 ├── init-podroid                  # VM initialization script
 ├── podroid-bridge.c              # PTY ↔ Serial socket relay
-├── Dockerfile                    # VM initramfs builder
-├── Dockerfile.qemu               # QEMU Android cross-compiler
-├── build-termux-android.sh       # Termux native library builder
-└── build-qemu-android.sh         # QEMU Android builder
+├── build-all.sh                  # Unified build script (initramfs/qemu/termux/all)
+├── Dockerfile                    # VM initramfs builder (multi-stage)
+├── gradle.properties              # Build config (QEMU version, etc.)
+└── gradlew                       # Gradle wrapper
 ```
 
 ### Native Components
