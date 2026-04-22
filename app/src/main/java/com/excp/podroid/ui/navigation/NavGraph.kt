@@ -1,5 +1,6 @@
 package com.excp.podroid.ui.navigation
 
+import androidx.compose.material3.windowsizeclass.WindowSizeClass
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -25,6 +26,7 @@ object Routes {
 @Composable
 fun PodroidNavGraph(
     settingsRepository: SettingsRepository,
+    windowSizeClass: WindowSizeClass,
     navController: NavHostController = rememberNavController(),
 ) {
     val isSetupDone by settingsRepository.isSetupDone.collectAsState(initial = null)
@@ -44,6 +46,7 @@ fun PodroidNavGraph(
     ) {
         composable(Routes.SETUP) {
             SetupScreen(
+                windowSizeClass = windowSizeClass,
                 onSetupComplete = {
                     navController.navigate(Routes.HOME) {
                         popUpTo(Routes.SETUP) { inclusive = true }
@@ -54,6 +57,7 @@ fun PodroidNavGraph(
 
         composable(Routes.HOME) {
             HomeScreen(
+                windowSizeClass = windowSizeClass,
                 onNavigateToTerminal = {
                     navController.navigate(Routes.TERMINAL) { launchSingleTop = true }
                 },
@@ -65,6 +69,7 @@ fun PodroidNavGraph(
 
         composable(Routes.TERMINAL) {
             TerminalScreen(
+                windowSizeClass = windowSizeClass,
                 viewModel = terminalViewModel,
                 onNavigateBack = {
                     // Only pop if we're not already at HOME to avoid the warning
@@ -81,6 +86,7 @@ fun PodroidNavGraph(
 
         composable(Routes.SETTINGS) {
             SettingsScreen(
+                windowSizeClass = windowSizeClass,
                 onNavigateBack = {
                     if (navController.currentDestination?.route == Routes.SETTINGS) {
                         navController.popBackStack()
@@ -89,9 +95,6 @@ fun PodroidNavGraph(
                             popUpTo(0) { inclusive = true }
                         }
                     }
-                },
-                onThemeOrFontChanged = {
-                    terminalViewModel.invalidateTerminalView()
                 },
             )
         }
