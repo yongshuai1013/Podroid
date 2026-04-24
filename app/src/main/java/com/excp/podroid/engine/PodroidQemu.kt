@@ -64,6 +64,7 @@ class PodroidQemu @Inject constructor(
 
     /** Unix socket paths exposed to TerminalViewModel for the bridge binary. */
     val serialSockPath: String get() = "${context.filesDir.absolutePath}/serial.sock"
+    val terminalSockPath: String get() = "${context.filesDir.absolutePath}/terminal.sock"
     val ctrlSockPath: String get() = "${context.filesDir.absolutePath}/ctrl.sock"
 
     /** Boot-monitoring socket connection. Closed when the bridge takes over. */
@@ -148,32 +149,24 @@ class PodroidQemu @Inject constructor(
         android.os.Handler(android.os.Looper.getMainLooper()).post {
             if (_terminalSession != null) return@post
             if (_state.value !is VmState.Running && _state.value !is VmState.Starting) return@post
-            
-            // Release the boot monitor connection.
-            releaseSerial()
 
-            // IMPORTANT: QEMU serial socket ('server,nowait') takes a beat to
-            // re-listen after a client disconnects. If the bridge tries to
-            // connect immediately, it may hit ECONNREFUSED.
-            android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
-                if (_terminalSession != null) return@postDelayed
-                val bridgeExe = File(context.applicationInfo.nativeLibraryDir, "libpodroid-bridge.so")
-                if (!bridgeExe.exists()) return@postDelayed
+            // Bridge connects to terminal.sock (virtio-console, separate from serial).
+            // No handoff with the boot monitor needed — they use different sockets.
+            val bridgeExe = File(context.applicationInfo.nativeLibraryDir, "libpodroid-bridge.so")
+            if (!bridgeExe.exists()) return@post
 
-                val sess = TerminalSession(
-                    bridgeExe.absolutePath,
-                    context.filesDir.absolutePath,
-                    arrayOf(bridgeExe.absolutePath, serialSockPath, ctrlSockPath),
-                    null,
-                    2000,
-                    proxySessionClient,
-                )
-                sess.updateSize(80, 24)
-                replayBootOutput(sess)
-                _terminalSession = sess
-                _terminalSessionAttached = false
-                Log.d(TAG, "Bridge auto-started (after 500ms delay)")
-            }, 500)
+            val sess = TerminalSession(
+                bridgeExe.absolutePath,
+                context.filesDir.absolutePath,
+                arrayOf(bridgeExe.absolutePath, terminalSockPath, ctrlSockPath),
+                null,
+                2000,
+                proxySessionClient,
+            )
+            sess.updateSize(80, 24)
+            _terminalSession = sess
+            _terminalSessionAttached = false
+            Log.d(TAG, "Bridge auto-started on terminal.sock")
         }
     }
 
@@ -187,9 +180,7 @@ class PodroidQemu @Inject constructor(
             return _terminalSession!!
         }
 
-        // Fallback: create session now (boot monitor may not have auto-started it)
-        releaseSerial()
-
+        // Fallback: create session now
         val bridgeExe = File(context.applicationInfo.nativeLibraryDir, "libpodroid-bridge.so")
         if (!bridgeExe.exists()) {
             throw IllegalStateException("podroid-bridge not found at ${bridgeExe.absolutePath}")
@@ -198,7 +189,7 @@ class PodroidQemu @Inject constructor(
         val sess = TerminalSession(
             bridgeExe.absolutePath,
             context.filesDir.absolutePath,
-            arrayOf(bridgeExe.absolutePath, serialSockPath, ctrlSockPath),
+            arrayOf(bridgeExe.absolutePath, terminalSockPath, ctrlSockPath),
             null,
             2000,
             proxySessionClient,
@@ -247,6 +238,7 @@ class PodroidQemu @Inject constructor(
         // included — a leftover file from a crashed QEMU prevents the new
         // process from binding its QMP server socket.
         File(serialSockPath).delete()
+        File(terminalSockPath).delete()
         File(ctrlSockPath).delete()
         File(qmpSocketPath).delete()
 
@@ -451,6 +443,7 @@ class PodroidQemu @Inject constructor(
         consoleBuilder.clear()
         _consoleText.value = ""
         File(serialSockPath).delete()
+        File(terminalSockPath).delete()
         File(ctrlSockPath).delete()
         _bootStage.value = ""
     }
@@ -529,12 +522,16 @@ class PodroidQemu @Inject constructor(
         args += "-netdev"; args += netdevArg
         args += "-device"; args += "virtio-net-pci,netdev=net0,romfile="
 
-        // ── Serial console (ttyAMA0) → unix socket for podroid-bridge ─────────
+        // ── Serial (ttyAMA0) → boot log sink only; kernel msgs + init boot stages ─
         args += "-serial"; args += "unix:$serialSockPath,server,nowait"
 
-        // ── Control channel (hvc0) → unix socket for resize signalling ────────
-        args += "-chardev"; args += "socket,id=ctrl0,path=$ctrlSockPath,server=on,wait=off"
+        // ── virtio-console bus ────────────────────────────────────────────────
+        // hvc0 = primary terminal (getty runs here; bridge connects to terminal.sock)
+        // hvc1 = control channel (init daemon reads RESIZE messages from ctrl.sock)
         args += "-device";  args += "virtio-serial-pci"
+        args += "-chardev"; args += "socket,id=term0,path=$terminalSockPath,server=on,wait=off"
+        args += "-device";  args += "virtconsole,chardev=term0,name=org.podroid.term"
+        args += "-chardev"; args += "socket,id=ctrl0,path=$ctrlSockPath,server=on,wait=off"
         args += "-device";  args += "virtconsole,chardev=ctrl0,name=org.podroid.ctrl"
 
         args += "-display"; args += "none"

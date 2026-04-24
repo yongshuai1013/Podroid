@@ -1,16 +1,18 @@
 /*
- * podroid-bridge — Serial socket ↔ PTY relay for Podroid
+ * podroid-bridge — virtio-console socket ↔ PTY relay for Podroid
  *
  * Bidirectional relay between:
  *   stdin/stdout  — PTY slave (Termux TerminalSession)
- *   serial.sock   — QEMU unix socket serial (ttyAMA0 in VM)
+ *   terminal.sock — QEMU virtio-console chardev (/dev/hvc0 in VM; primary terminal)
  *
  * Architecture:
- *   - PTY → VM: keystrokes pass through raw; ttyAMA0 handles echo/editing
- *   - VM  → PTY: output filtered for ESC[18t/ESC[19t queries (answered locally)
+ *   - PTY → VM: keystrokes pass through raw; the VM's getty/bash handles echo/editing.
+ *   - VM  → PTY: output forwarded as-is. virtio-console reports real terminal
+ *     size via TIOCGWINSZ inside the guest, so we don't need to intercept
+ *     ESC[18t queries (the old PL011-serial hack).
  *   - SIGWINCH: TerminalSession calls ioctl(TIOCSWINSZ) on PTY master →
- *     we write "RESIZE rows cols\n" to ctrl.sock → VM daemon applies it
- *       to ttyAMA0 → foreground process gets SIGWINCH (nvim/vim/htop resize)
+ *     we write "RESIZE rows cols\n" to ctrl.sock (/dev/hvc1 in VM) → init
+ *     daemon stty's hvc0 → foreground TUI gets SIGWINCH.
  *
  * Signals:
  *   SIGPIPE  — ignored; EPIPE on write = EOF, handled in main loop
@@ -18,7 +20,7 @@
  *   SIGTERM  — graceful shutdown
  *   SIGWINCH — async flag, processed in select() loop; fires send_resize() immediately
  *
- * Args: <serial.sock> <ctrl.sock>
+ * Args: <terminal.sock> <ctrl.sock>
  */
 
 #include <errno.h>
@@ -36,7 +38,7 @@
 static volatile sig_atomic_t g_winch    = 0;
 static volatile sig_atomic_t g_shutdown = 0;
 static int                   g_ctrl_fd   = -1;
-static int                   g_serial_fd = -1;
+static int                   g_term_fd   = -1;
 
 static void on_winch(int sig) { (void)sig; g_winch = 1; }
 static void on_term(int sig)  { (void)sig; g_shutdown = 1; }
@@ -91,42 +93,9 @@ static void send_resize(void) {
     }
 }
 
-/* Intercept ESC[18t / ESC[19t (xterm window size queries) from the VM.
- * Busybox less sends these when ioctl(TIOCGWINSZ) returns a suspicious size.
- * We respond immediately with the real PTY size and strip the query bytes
- * so they never reach the Android TerminalEmulator (which ignores them). */
-static int filter_queries(char *buf, int n) {
-    int out = 0;
-    int respond = 0;
-    int code = 8;
-
-    for (int i = 0; i < n; ) {
-        if (i + 4 < n && buf[i] == '\033' && buf[i+1] == '['
-                      && buf[i+2] == '1'  && buf[i+4] == 't'
-                      && (buf[i+3] == '8' || buf[i+3] == '9')) {
-            respond = 1;
-            code = (buf[i+3] == '8') ? 8 : 9;
-            i += 5;
-            continue;
-        }
-        buf[out++] = buf[i++];
-    }
-
-    if (respond) {
-        struct winsize ws;
-        memset(&ws, 0, sizeof(ws));
-        if (ioctl(STDIN_FILENO, TIOCGWINSZ, &ws) == 0 && ws.ws_row > 0) {
-            char resp[32];
-            int len = snprintf(resp, sizeof(resp), "\033[%d;%d;%dt", code, ws.ws_row, ws.ws_col);
-            write_all(g_serial_fd, resp, len);
-        }
-    }
-    return out;
-}
-
 static void cleanup(void) {
-    if (g_serial_fd >= 0) { close(g_serial_fd); g_serial_fd = -1; }
-    if (g_ctrl_fd   >= 0) { close(g_ctrl_fd);   g_ctrl_fd   = -1; }
+    if (g_term_fd >= 0) { close(g_term_fd); g_term_fd = -1; }
+    if (g_ctrl_fd >= 0) { close(g_ctrl_fd); g_ctrl_fd = -1; }
 }
 
 int main(int argc, char *argv[]) {
@@ -142,8 +111,8 @@ int main(int argc, char *argv[]) {
     }
     if (argc < 3) return 1;
 
-    g_serial_fd = connect_unix(argv[1], 50, 200000);
-    if (g_serial_fd < 0) {
+    g_term_fd = connect_unix(argv[1], 50, 200000);
+    if (g_term_fd < 0) {
         fprintf(stderr, "podroid-bridge: cannot connect to %s\n", argv[1]);
         return 1;
     }
@@ -175,9 +144,9 @@ int main(int argc, char *argv[]) {
 
         fd_set rfds;
         FD_ZERO(&rfds);
-        FD_SET(STDIN_FILENO,  &rfds);
-        FD_SET(g_serial_fd,   &rfds);
-        int nfds = (g_serial_fd > STDIN_FILENO ? g_serial_fd : STDIN_FILENO) + 1;
+        FD_SET(STDIN_FILENO, &rfds);
+        FD_SET(g_term_fd,    &rfds);
+        int nfds = (g_term_fd > STDIN_FILENO ? g_term_fd : STDIN_FILENO) + 1;
         struct timeval tv = { .tv_sec = 0, .tv_usec = 50000 };
         int ret = select(nfds, &rfds, NULL, NULL, &tv);
         if (ret < 0) { if (errno == EINTR) continue; break; }
@@ -185,13 +154,12 @@ int main(int argc, char *argv[]) {
         if (FD_ISSET(STDIN_FILENO, &rfds)) {
             int n = read(STDIN_FILENO, buf, sizeof(buf));
             if (n <= 0) break;
-            if (write_all(g_serial_fd, buf, n) < 0) break;
+            if (write_all(g_term_fd, buf, n) < 0) break;
         }
-        if (FD_ISSET(g_serial_fd, &rfds)) {
-            int n = read(g_serial_fd, buf, sizeof(buf));
+        if (FD_ISSET(g_term_fd, &rfds)) {
+            int n = read(g_term_fd, buf, sizeof(buf));
             if (n <= 0) break;
-            n = filter_queries(buf, n);
-            if (n > 0 && write_all(STDOUT_FILENO, buf, n) < 0) break;
+            if (write_all(STDOUT_FILENO, buf, n) < 0) break;
         }
     }
 

@@ -191,15 +191,15 @@ dmesg -n 1 2>/dev/null
 stty rows 24 cols 80 -ixon -ixoff -iexten 2>/dev/null
 trap 'podman stop -a -t 5 2>/dev/null; podman network prune -f 2>/dev/null; sync' TERM INT HUP
 
-# ── Resize daemon ─────────────────────────────────────────────────────────────
+# ── Resize daemon (reads RESIZE msgs from hvc1, applies to hvc0 terminal) ─────
 (
-    for _i in $(seq 1 30); do [ -c /dev/hvc0 ] && break; sleep 1; done
-    [ -c /dev/hvc0 ] || exit 0
+    for _i in $(seq 1 30); do [ -c /dev/hvc1 ] && break; sleep 1; done
+    [ -c /dev/hvc1 ] || exit 0
     while IFS= read -r _line; do
         case "$_line" in
-            RESIZE\ *) set -- $_line; stty rows "$2" cols "$3" </dev/ttyAMA0 2>/dev/null ;;
+            RESIZE\ *) set -- $_line; stty rows "$2" cols "$3" </dev/hvc0 2>/dev/null ;;
         esac
-    done </dev/hvc0
+    done </dev/hvc1
 ) &
 
 # ── MOTD + profile ────────────────────────────────────────────────────────────
@@ -277,12 +277,10 @@ grep -q '^root:' /etc/passwd 2>/dev/null || \
 boot_stage "Ready!"
 rm -f /run/boot_stage
 
-# Hand off serial.sock to bridge — monitor reads "Ready!" then disconnects;
-# single-client socket requires this gap before getty takes over.
-sleep 0.5
-
+# getty runs on /dev/hvc0 (virtio-console, primary terminal). The serial port
+# (ttyAMA0) stays attached to the boot-monitor socket for console.log.
 while true; do
-    /sbin/getty -n -l /usr/local/bin/podroid-login 0 ttyAMA0 xterm-256color
+    /sbin/getty -n -l /usr/local/bin/podroid-login 0 hvc0 xterm-256color
     sleep 1
 done
 fi
