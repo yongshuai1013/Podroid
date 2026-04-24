@@ -1,6 +1,6 @@
 # Podroid AI Context
 
-> **Last updated:** 2026-04-22
+> **Last updated:** 2026-04-23
 > **Purpose:** Complete project context for AI-assisted development. Read this before touching any file.
 
 ---
@@ -39,13 +39,13 @@
 ### High-Level Flow
 ```
 Android App
-├── PodroidApplication — extracts assets (vmlinuz, initrd, qemu/) on first run
-├── PodroidService (foreground) — hosts QEMU, holds WakeLock
+├── PodroidApplication — extracts assets (vmlinuz, initrd, qemu/) on first run (size-checked to skip if unchanged)
+├── PodroidService (foreground) — hosts QEMU, holds WakeLock, updates notification with boot stages
 ├── PodroidQemu (singleton)
 │   ├── QEMU process (libqemu-system-aarch64.so — ELF binary renamed .so for APK)
 │   ├── serial.sock — boot monitor reads until "Ready!", then bridge connects
 │   ├── ctrl.sock — virtio-console for RESIZE signals from bridge
-│   └── qmp.sock — QEMU Machine Protocol for runtime control
+│   └── qmp.sock — QEMU Machine Protocol for runtime control (port forwarding)
 └── Compose UI
     └── Screens: Setup → Home → Terminal / Settings
 ```
@@ -63,6 +63,25 @@ Android App
 
 ### Single-Client Socket Constraint
 `serial.sock` is QEMU `server,nowait` — only ONE client at a time. Boot monitor connects first. `releaseSerial()` frees it. Bridge has a 50×200ms retry loop. The `sleep 2` in init-podroid and the 500ms `postDelayed` in `autoStartBridge()` are both critical timing guards.
+
+---
+
+## Performance Tuning (TCG, no KVM)
+
+All tuning applies under software emulation only — KVM is impossible without root.
+
+**In `PodroidQemu.buildCommand()`:**
+- `tcg,thread=multi` — one host thread per vCPU.
+- `tb-size`: 256 MB for <2 GB RAM, 512 MB for ≥2 GB — larger Translation Block cache reduces re-translation for JIT-heavy workloads (Node, JVM in containers).
+- `iothread=iothread0` on `virtio-blk-pci` — dedicated I/O thread decoupled from vCPU threads; biggest win for container image pull/extraction.
+- `mitigations=off` in guest kernel cmdline — safe inside TCG VM (speculative execution attacks can't cross the emulated ISA boundary); 5–15% CPU gain.
+- `elevator=mq-deadline` in guest kernel cmdline — request merging for virtio-blk random writes (Podman overlay graph driver).
+
+**In `init-podroid`:**
+- ZRAM swap at half physical RAM using lz4 — gives 1.5–2× effective memory with near-zero I/O cost; swapon at priority 100 so it's preferred over any file swap.
+
+**In `Dockerfile` (QEMU build):**
+- `-O3 -flto=thin` in `--extra-cflags` / `--extra-ldflags` — LLVM thin LTO optimises across QEMU's translation units including the TCG hot path.
 
 ---
 
@@ -155,12 +174,15 @@ Android App
 ```
 
 ### Native Libs (app/src/main/jniLibs/arm64-v8a/)
-```
-├── libqemu-system-aarch64.so       # QEMU binary renamed .so for APK packaging
-├── libslirp.so                     # SLIRP networking (soname patched from .so.0 via patchelf)
-├── libpodroid-bridge.so            # PTY↔serial bridge binary renamed .so for APK packaging
-└── libtermux.so                    # Termux terminal JNI (custom-built with 16KB page alignment)
-```
+
+**Note:** All native binaries require 16KB page alignment (`-Wl,-z,max-page-size=16384`) — mandatory on Android 13+.
+
+| File | What it is |
+|---|---|
+| `libqemu-system-aarch64.so` | QEMU TCG emulator (PIE executable, 16KB aligned) |
+| `libpodroid-bridge.so` | PTY ↔ serial relay (PIE executable, 16KB aligned) |
+| `libtermux.so` | Termux terminal emulator JNI (rebuilt for 16KB pages) |
+| `libslirp.so` | SLIRP user-mode networking (statically linked into QEMU) |
 
 ---
 
@@ -168,6 +190,7 @@ Android App
 
 | Item | Value |
 |------|-------|
+| podroidKernelVersion | Set in `gradle.properties` (controls kernel source version) |
 | QEMU binary | `libqemu-system-aarch64.so` in `nativeLibraryDir` |
 | Kernel | `filesDir/vmlinuz-virt` |
 | Initrd | `filesDir/initrd.img` |
@@ -335,13 +358,13 @@ arrow(final): if mod==1 → "\x1b[$final"  else → "\x1b[1;$mod$final"
 
 - **Purpose**: Relay PTY (Termux-allocated) ↔ `serial.sock` (QEMU serial)
 - **Arguments**: `bridge_exe serial_sock_path ctrl_sock_path`
-- **STDERR silenced** immediately via `dup2(/dev/null, STDERR_FILENO)` — bridge runs as TerminalSession subprocess so stderr IS the PTY
-- **`cfmakeraw()`** on own stdin (VM's getty handles echo/line editing)
-- **serial.sock retry**: 50 attempts × 200ms = 10s max
-- **ctrl.sock retry**: 50 × 100ms = 5s max; lazy reconnect on each SIGWINCH if not yet connected
-- **`filter_queries()`**: Intercepts `ESC[18t` / `ESC[19t` (xterm window size queries from busybox `less`), responds locally with fake size, strips bytes — prevents garbage in terminal output
-- **`send_resize()`**: On SIGWINCH, reads new size via `TIOCGWINSZ`, writes `RESIZE rows cols\n` to ctrl.sock
-- **select timeout**: 50ms (allows SIGWINCH handling without blocking)
+- **STDERR silenced** immediately via `dup2(/dev/null, STDERR_FILENO)` — bridge runs as TerminalSession subprocess so stderr IS the PTY.
+- **`cfmakeraw()`** on own stdin (VM's getty handles echo/line editing).
+- **serial.sock retry**: 50 attempts × 200ms = 10s max.
+- **ctrl.sock retry**: 50 × 100ms = 5s max; lazy reconnect on each SIGWINCH if not yet connected.
+- **`filter_queries()`**: Intercepts `ESC[18t` / `ESC[19t` (xterm window size queries from busybox `less`), responds locally with fake size (using `TIOCGWINSZ`), strips bytes — prevents garbage in terminal output.
+- **`send_resize()`**: On SIGWINCH, reads new size via `TIOCGWINSZ`, writes `RESIZE rows cols\n` to ctrl.sock.
+- **select timeout**: 50ms (allows SIGWINCH handling without blocking).
 
 ---
 
@@ -383,40 +406,39 @@ dropbear ncurses-terminfo-base musl-locales
 
 ## Build Commands
 
+All components are coordinated by `build-all.sh`:
+
 ```bash
-# Build initramfs (Docker required, ~3min first time, cached after)
-./build-all.sh initramfs
-# → app/src/main/assets/vmlinuz-virt + initrd.img
+./build-all.sh kernel      # Build custom kernel only (podroid_kernel.config, ~5–10 min)
+./build-all.sh initramfs   # Build custom kernel + Alpine initramfs (~10–15 min total)
+./build-all.sh qemu        # Build QEMU + podroid-bridge via Docker (~30 min first time)
+./build-all.sh termux      # Build libtermux.so via local NDK (16KB page alignment)
+./build-all.sh apk         # Build Android APK via Gradle
+./build-all.sh all         # Build everything
+./build-all.sh deploy      # Full deploy workflow
+./build-all.sh test        # Boot validation: deploys APK, polls console.log for "Ready!"
+```
 
-# Build QEMU + bridge (Docker, ~30min first time)
-./build-all.sh qemu
-# → app/src/main/jniLibs/arm64-v8a/{libqemu-system-aarch64.so,libslirp.so,libpodroid-bridge.so}
-# → app/src/main/assets/qemu/
-
-# Build Termux JNI lib (local NDK)
-./build-all.sh termux
-# → app/src/main/jniLibs/arm64-v8a/libtermux.so
-
-# Build APK
+**APK only:**
+```bash
 ./gradlew assembleDebug
+./gradlew installDebug
+```
 
-# Uninstall + install (debug package)
-adb uninstall com.excp.podroid.debug
-adb install -r app/build/outputs/apk/debug/app-debug.apk
-
-# Fast bridge rebuild (without full Docker QEMU build)
+**Fast bridge rebuild (without full Docker QEMU build):**
+```bash
 NDK=$HOME/Android/Sdk/ndk/$(ls ~/Android/Sdk/ndk/ | tail -1)
 CC=$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android28-clang
 $CC --sysroot=$NDK/toolchains/llvm/prebuilt/linux-x86_64/sysroot \
     -target aarch64-linux-android28 -fPIE -pie -Wl,-z,max-page-size=16384 \
     podroid-bridge.c -o app/src/main/jniLibs/arm64-v8a/libpodroid-bridge.so
 ./gradlew :app:installDebug
+```
 
-# Full rebuild + deploy
-./build-all.sh all
-
-# Automated boot test
-./build-all.sh test
+**Monitor VM boot:**
+```bash
+adb logcat -s PodroidQemu
+adb shell run-as com.excp.podroid.debug cat files/console.log
 ```
 
 **Workflow**:

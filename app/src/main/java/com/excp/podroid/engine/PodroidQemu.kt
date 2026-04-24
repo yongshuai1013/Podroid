@@ -469,7 +469,8 @@ class PodroidQemu @Inject constructor(
         args += "-cpu"; args += "max"
         args += "-smp"; args += "$cpus"
         args += "-m";   args += "$ramMb"
-        args += "-accel"; args += "tcg,thread=multi,tb-size=256"
+        val tbSize = if (ramMb >= 2048) 512 else 256
+        args += "-accel"; args += "tcg,thread=multi,tb-size=$tbSize"
 
         val kernelPath = File(context.filesDir, "vmlinuz-virt")
         val initrdPath = File(context.filesDir, "initrd.img")
@@ -477,7 +478,7 @@ class PodroidQemu @Inject constructor(
         if (kernelPath.exists()) {
             args += "-kernel"; args += kernelPath.absolutePath
             val cmdline = buildString {
-                append("console=ttyAMA0 loglevel=1 quiet")
+                append("console=ttyAMA0 loglevel=1 quiet mitigations=off elevator=mq-deadline")
                 append(" androidip=$androidIp")
                 if (sshEnabled) append(" ssh=1")
             }
@@ -494,7 +495,8 @@ class PodroidQemu @Inject constructor(
 
         val storagePath = File(context.filesDir, "storage.img")
         if (storagePath.exists()) {
-            args += "-device"; args += "virtio-blk-pci,drive=drive1,num-queues=$cpus"
+            args += "-object"; args += "iothread,id=iothread0"
+            args += "-device"; args += "virtio-blk-pci,drive=drive1,num-queues=$cpus,iothread=iothread0"
             args += "-drive";  args += "file=${storagePath.absolutePath},if=none,id=drive1,format=raw,cache=writeback,aio=threads"
         }
 
