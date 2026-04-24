@@ -1,98 +1,98 @@
 #!/bin/bash
-# Podroid init — persistent Alpine Linux VM with Podman
-# Two-phase: Phase 1 mounts the overlay, Phase 2 runs the main system.
+# Podroid init — Alpine Linux VM bootstrap
+# Phase 1 (direct exec): mounts persistent overlay, pivots via chroot
+# Phase 2 (--main):      full system setup, starts getty
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Phase 2: Main init (running inside persistent overlay)
+# Phase 2: Main system init (inside persistent overlay)
 # ══════════════════════════════════════════════════════════════════════════════
 if [ "$1" = "--main" ]; then
 
-# ── Boot stage output (for Android UI detection) ─────────────────────────────
-mkdir -p /run
-boot_stage() { echo "$*" > /run/boot_stage 2>/dev/null; echo "$*"; }
+mkdir -p /run /var/log
+_ILOG=/var/log/init.log
+_log() { printf '%s %s\n' "$(date +%H:%M:%S)" "$*" >> "$_ILOG" 2>/dev/null; }
+boot_stage() { printf '%s\n' "$*" > /run/boot_stage 2>/dev/null; printf '[%s] %s\n' "$(date +%H:%M:%S)" "$*"; }
 boot_stage "Initializing system..."
 
-# ── Init logging (silent unless error) ───────────────────────────────────────
-_LOG=/tmp/init-early.log
-log() { printf "%s %s\n" "$(date '+%H:%M:%S' 2>/dev/null)" "$*" >> "$_LOG" 2>/dev/null; }
-log_error() { printf "[init] ERROR: %s\n" "$*"; log "ERROR: $*"; }
+# ── Core filesystems ──────────────────────────────────────────────────────────
+mount -t proc    proc      /proc  -o noexec,nosuid,nodev  2>/dev/null
+mount -t sysfs   sys       /sys   -o noexec,nosuid,nodev  2>/dev/null
+mount -t devtmpfs devtmpfs /dev   -o exec,nosuid,mode=0755,size=2M 2>/dev/null || \
+    mount -t tmpfs tmpfs   /dev   -o exec,nosuid,mode=0755,size=2M  2>/dev/null
 
-# ── Core filesystems ───────────────────────────────────────────────────────────
-mount -t proc proc /proc -o noexec,nosuid,nodev 2>/dev/null
-mount -t sysfs sys /sys -o noexec,nosuid,nodev 2>/dev/null
-mount -t devtmpfs devtmpfs /dev -o exec,nosuid,mode=0755,size=2M 2>/dev/null || \
-    mount -t tmpfs tmpfs /dev -o exec,nosuid,mode=0755,size=2M 2>/dev/null
 mkdir -p /dev/pts /dev/shm /dev/mqueue /dev/net 2>/dev/null
 
-# devpts with newinstance - REQUIRED for PTY in containers
+# newinstance devpts — required for PTY isolation in containers
 mount -t devpts devpts /dev/pts \
     -o gid=5,mode=0620,ptmxmode=0666,newinstance,noexec,nosuid 2>/dev/null || \
-    log_error "Failed to mount devpts"
+    _log "devpts mount failed"
 
-# Create ptmx as real char device (not symlink) - REQUIRED for crun
+# Real ptmx char device — required for crun PTY allocation
 rm -f /dev/ptmx 2>/dev/null
-mknod /dev/ptmx c 5 2 2>/dev/null || log_error "Failed to create /dev/ptmx"
+mknod /dev/ptmx c 5 2 2>/dev/null || _log "mknod /dev/ptmx failed"
 chmod 0666 /dev/ptmx /dev/pts/ptmx 2>/dev/null
 
-mount -t tmpfs tmpfs /dev/shm  -o noexec,nosuid,nodev,size=64m 2>/dev/null
-mount -t tmpfs tmpfs /tmp      -o noexec,nosuid,nodev 2>/dev/null
-mount -t tmpfs tmpfs /run      -o noexec,nosuid,nodev,mode=0755 2>/dev/null
+mount -t tmpfs tmpfs /dev/shm -o noexec,nosuid,nodev,size=64m 2>/dev/null
+mount -t tmpfs tmpfs /tmp     -o noexec,nosuid,nodev            2>/dev/null
+mount -t tmpfs tmpfs /run     -o noexec,nosuid,nodev,mode=0755  2>/dev/null
 
-# ── cgroup2 (REQUIRED for Podman on Alpine) ─────────────────────────────────
-mkdir -p /sys/fs/cgroup
+# ── cgroup2 ───────────────────────────────────────────────────────────────────
+mkdir -p /sys/fs/cgroup 2>/dev/null
 mount -t cgroup2 cgroup2 /sys/fs/cgroup 2>/dev/null
-if [ -f /sys/fs/cgroup/cgroup.subtree_control ]; then
-    for ctrl in cpuset cpu io memory hugetlb pids rdma misc; do
-        echo "+$ctrl" > /sys/fs/cgroup/cgroup.subtree_control 2>/dev/null
-    done
-fi
+printf '+cpuset +cpu +io +memory +hugetlb +pids +rdma\n' \
+    > /sys/fs/cgroup/cgroup.subtree_control 2>/dev/null
 
-# ── Busybox + dirs ────────────────────────────────────────────────────────────
+# ── Busybox + directory tree ──────────────────────────────────────────────────
 /bin/busybox --install -s 2>/dev/null
-
-# Make sh point to bash (Alpine uses sh by default)
 ln -sf /bin/bash /bin/sh 2>/dev/null
 
-mkdir -p /var/lib/containers/storage /var/log /var/tmp /root
-mkdir -p /run/lock /run/containers/storage /run/libpod /run/crun
-mkdir -p /usr/local/bin /usr/local/sbin 2>/dev/null
-chmod 700 /root
-chmod 1777 /tmp /var/tmp
-cp "$_LOG" /var/log/init.log 2>/dev/null && _LOG=/var/log/init.log
+mkdir -p \
+    /var/lib/containers/storage \
+    /run/containers/storage /run/libpod /run/crun /run/lock \
+    /etc/containers /etc/dropbear /etc/crun \
+    /mnt/downloads \
+    /usr/local/bin /usr/local/sbin \
+    /root /root/.ssh /var/tmp 2>/dev/null
 
-# ── Hostname + hosts ─────────────────────────────────────────────────────────
-echo "podroid" > /etc/hostname 2>/dev/null
+chmod 700 /root /root/.ssh 2>/dev/null
+chmod 1777 /tmp /var/tmp   2>/dev/null
+
+printf 'podroid\n' > /etc/hostname
 hostname podroid 2>/dev/null
-cat > /etc/hosts <<'HOSTS'
-127.0.0.1   localhost podroid
-::1         localhost ip6-localhost ip6-loopback
-HOSTS
+printf '127.0.0.1\tlocalhost podroid\n::1\tlocalhost ip6-localhost\n' > /etc/hosts
 
-# ── Kernel modules (silent) ─────────────────────────────────────────────────
+# ── Kernel modules + device nodes ────────────────────────────────────────────
 boot_stage "Loading kernel modules..."
-KVER=$(uname -r)
-if [ -d "/lib/modules/$KVER" ]; then
+_kver=$(uname -r)
+if [ -d "/lib/modules/$_kver" ]; then
     depmod -a 2>/dev/null
-    for mod in \
+    for _mod in \
         virtio_net virtio_blk fuse tun veth \
         bridge br_netfilter overlay \
         xt_addrtype xt_conntrack xt_nat xt_mark xt_comment \
         nf_nat nf_conntrack nf_conntrack_netlink nfnetlink \
         ip_tables ip6_tables ip6table_nat \
         9p 9pnet 9pnet_virtio; do
-        modprobe "$mod" 2>/dev/null
+        modprobe "$_mod" 2>/dev/null
     done
 fi
-# Ensure required device nodes exist
-[ ! -c /dev/net/tun ] && mknod /dev/net/tun c 10 200 2>/dev/null
-[ ! -c /dev/fuse    ] && mknod /dev/fuse   c 10 229 2>/dev/null
+[ -c /dev/net/tun ] || mknod /dev/net/tun c 10 200 2>/dev/null
+[ -c /dev/fuse    ] || mknod /dev/fuse   c 10 229 2>/dev/null
 
-# ── Read kernel cmdline params ───────────────────────────────────────────────
-ANDROID_IP=""
-SSH_ENABLED=0
-for param in $(cat /proc/cmdline); do
-    case "$param" in
-        androidip=*) ANDROID_IP="${param#androidip=}" ;;
+# ── ZRAM swap (built-in; half RAM at lz4) ────────────────────────────────────
+if [ -b /dev/zram0 ]; then
+    _mem_kb=$(awk '/^MemTotal:/{print $2}' /proc/meminfo)
+    echo lz4    > /sys/block/zram0/comp_algorithm 2>/dev/null || \
+    echo lzo-rle > /sys/block/zram0/comp_algorithm 2>/dev/null
+    echo $(( _mem_kb * 512 )) > /sys/block/zram0/disksize 2>/dev/null
+    mkswap /dev/zram0 >/dev/null 2>&1 && swapon -p 100 /dev/zram0 2>/dev/null
+fi
+
+# ── Kernel cmdline ────────────────────────────────────────────────────────────
+ANDROID_IP="" SSH_ENABLED=0
+for _p in $(cat /proc/cmdline); do
+    case "$_p" in
+        androidip=*) ANDROID_IP="${_p#androidip=}" ;;
         ssh=1)       SSH_ENABLED=1 ;;
     esac
 done
@@ -101,68 +101,58 @@ done
 boot_stage "Waiting for network..."
 ip link set lo up 2>/dev/null
 NETIF=""
-for i in $(seq 1 30); do
-    NETIF=$(ip -o link show 2>/dev/null | awk -F': ' '{print $2}' | grep -v lo | head -1)
+for _i in $(seq 1 150); do
+    NETIF=$(ip -o link show 2>/dev/null | awk -F': ' '{print $2}' | \
+        grep -vE '^(lo|dummy[0-9]*|sit[0-9]*|gre[0-9]*|tunl[0-9]*|br-|veth|podman|cni-)' | head -1)
     [ -n "$NETIF" ] && break
-    sleep 1
+    sleep 0.2
 done
 
 if [ -n "$NETIF" ]; then
-    ip link set dev "$NETIF" up 2>/dev/null
+    ip link set "$NETIF" up 2>/dev/null
     ip addr add 10.0.2.15/24 dev "$NETIF" 2>/dev/null
     ip route add default via 10.0.2.2 dev "$NETIF" 2>/dev/null
-    boot_stage "Network found"
 else
-    log_error "No network interface found after 30s"
-    boot_stage "Network found"
+    _log "No network interface found after 30s"
 fi
+boot_stage "Network found"
 
-cat > /etc/resolv.conf <<'DNS'
-nameserver 10.0.2.3
-nameserver 8.8.8.8
-nameserver 1.1.1.1
-DNS
+printf 'nameserver 10.0.2.3\nnameserver 8.8.8.8\nnameserver 1.1.1.1\n' > /etc/resolv.conf
 
-# ── Downloads folder (9p) ─────────────────────────────────────────────────────
-mkdir -p /mnt/downloads
-mount -t 9p \
-    -o trans=virtio,version=9p2000.L,rw,msize=1048576,cache=loose,noatime \
-    downloads /mnt/downloads 2>/dev/null
+# 9p downloads — non-critical, mount in background
+mount -t 9p -o trans=virtio,version=9p2000.L,rw,msize=1048576,cache=loose,noatime \
+    downloads /mnt/downloads 2>/dev/null &
 
-# ── Container configuration ──────────────────────────────────────────────────
+# ── Container setup ───────────────────────────────────────────────────────────
 boot_stage "Configuring containers..."
 
-# Container sysctls (Alpine/Podman best practices)
-sysctl -qw net.ipv4.ip_forward=1 2>/dev/null
-sysctl -qw net.ipv4.conf.all.forwarding=1 2>/dev/null
-sysctl -qw net.bridge.bridge-nf-call-iptables=1 2>/dev/null
-sysctl -qw net.bridge.bridge-nf-call-ip6tables=1 2>/dev/null
+sysctl -qw \
+    net.ipv4.ip_forward=1 \
+    net.ipv4.conf.all.forwarding=1 \
+    net.bridge.bridge-nf-call-iptables=1 \
+    net.bridge.bridge-nf-call-ip6tables=1 \
+    fs.inotify.max_user_instances=256 \
+    fs.inotify.max_user_watches=65536 \
+    net.core.rmem_max=26214400 \
+    net.core.wmem_max=26214400 2>/dev/null
 sysctl -qw net.ipv4.ping_group_range="0 2147483647" 2>/dev/null
-sysctl -qw kernel.unprivileged_userns_clone=1 2>/dev/null
-sysctl -qw fs.inotify.max_user_instances=256 2>/dev/null
-sysctl -qw fs.inotify.max_user_watches=65536 2>/dev/null
-sysctl -qw net.core.rmem_max=26214400 2>/dev/null
-sysctl -qw net.core.wmem_max=26214400 2>/dev/null
 
-# Podman configuration (Alpine official recommendations)
-[ -f /etc/subuid ] || echo "root:100000:65536" > /etc/subuid
-[ -f /etc/subgid ] || echo "root:100000:65536" > /etc/subgid
+[ -f /etc/subuid ] || printf 'root:100000:65536\n' > /etc/subuid
+[ -f /etc/subgid ] || printf 'root:100000:65536\n' > /etc/subgid
 
-mkdir -p /etc/containers
-cat > /etc/containers/containers.conf <<'CONF'
+cat > /etc/containers/containers.conf <<'EOF'
 [containers]
 cgroups = "enabled"
 
 [engine]
 runtime = "crun"
-network_cmd = "/usr/bin/slirp4netns"
 events_logger = "file"
 
 [network]
 network_backend = "netavark"
-CONF
+EOF
 
-cat > /etc/containers/storage.conf <<'CONF'
+cat > /etc/containers/storage.conf <<'EOF'
 [storage]
 driver = "overlay"
 runroot = "/run/containers/storage"
@@ -170,115 +160,92 @@ graphroot = "/var/lib/containers/storage"
 
 [storage.options.overlay]
 mount_program = "/usr/bin/fuse-overlayfs"
-CONF
+EOF
 
-cat > /etc/containers/registries.conf <<'CONF'
-unqualified-search-registries = ["docker.io", "quay.io"]
-CONF
+printf 'unqualified-search-registries = ["docker.io", "quay.io"]\n' \
+    > /etc/containers/registries.conf
+touch /etc/crun/crun.conf 2>/dev/null
 
-mkdir -p /etc/crun
-[ -f /etc/crun/crun.conf ] || touch /etc/crun/crun.conf
-
-# ── SSH setup (Dropbear) ──────────────────────────────────────────────────────
+# ── SSH (Dropbear) ────────────────────────────────────────────────────────────
 if [ "$SSH_ENABLED" = "1" ]; then
     boot_stage "Starting SSH..."
     if [ ! -f /etc/podroid-ssh-init ]; then
-        echo "root:podroid" | chpasswd 2>/dev/null
+        printf 'root:podroid\n' | chpasswd 2>/dev/null
         touch /etc/podroid-ssh-init
     fi
-
-    mkdir -p /etc/dropbear
-    if [ ! -f /etc/dropbear/dropbear_rsa_host_key ]; then
-        dropbearkey -t rsa -f /etc/dropbear/dropbear_rsa_host_key >/dev/null 2>&1
-    fi
-
-    mkdir -p /root/.ssh
-    chmod 700 /root/.ssh
+    rm -f /etc/dropbear/dropbear_rsa_host_key 2>/dev/null
+    [ -f /etc/dropbear/dropbear_ed25519_host_key ] || \
+        dropbearkey -t ed25519 -f /etc/dropbear/dropbear_ed25519_host_key >/dev/null 2>&1
     dropbear -p 22 >/dev/null 2>&1
 fi
 
-# ── Environment ────────────────────────────────────────────────────────────────
+# ── Environment ───────────────────────────────────────────────────────────────
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-export HOME=/root
-export TERM=xterm-256color
-export LANG=C.UTF-8
-export LC_ALL=C.UTF-8
-export CHARSET=UTF-8
+export HOME=/root TERM=xterm-256color LANG=C.UTF-8 LC_ALL=C.UTF-8 CHARSET=UTF-8
 export PODMAN_IGNORE_CGROUPSV1_WARNING=1
 export CONTAINERS_CONF=/etc/containers/containers.conf
 export CONTAINERS_STORAGE_CONF=/etc/containers/storage.conf
 export CONTAINERS_REGISTRIES_CONF=/etc/containers/registries.conf
 
-# ── Console settings ─────────────────────────────────────────────────────────
 dmesg -n 1 2>/dev/null
 stty rows 24 cols 80 -ixon -ixoff -iexten 2>/dev/null
+trap 'podman stop -a -t 5 2>/dev/null; podman network prune -f 2>/dev/null; sync' TERM INT HUP
 
-# ── Shutdown handler ─────────────────────────────────────────────────────────
-shutdown_handler() {
-    podman stop -a -t 5 2>/dev/null
-    podman network prune -f 2>/dev/null
-    sync
-}
-trap shutdown_handler TERM INT HUP
+# ── Resize daemon ─────────────────────────────────────────────────────────────
+(
+    for _i in $(seq 1 30); do [ -c /dev/hvc0 ] && break; sleep 1; done
+    [ -c /dev/hvc0 ] || exit 0
+    while IFS= read -r _line; do
+        case "$_line" in
+            RESIZE\ *) set -- $_line; stty rows "$2" cols "$3" </dev/ttyAMA0 2>/dev/null ;;
+        esac
+    done </dev/hvc0
+) &
 
-# ── Gather system info for MOTD ──────────────────────────────────────────────
+# ── MOTD + profile ────────────────────────────────────────────────────────────
 boot_stage "Almost ready..."
-VM_IP=$(ip addr show "$NETIF" 2>/dev/null | grep 'inet ' | awk '{print $2}' | cut -d'/' -f1)
-STORAGE_USED=$(df -BG / 2>/dev/null | awk 'NR==2 {gsub(/G/,"",$3); print $3}')
-STORAGE_TOTAL=$(df -BG / 2>/dev/null | awk 'NR==2 {gsub(/G/,"",$2); print $2}')
-MEM_MB=$(free -m 2>/dev/null | awk '/^Mem:/{print $2}')
-MEM_AVAIL=$(free -m 2>/dev/null | awk '/^Mem:/{print $7}')
-CPUS=$(nproc 2>/dev/null || echo "?")
-KVER_SHORT=$(uname -r | cut -d- -f1)
-UPTIME_SEC=$(cat /proc/uptime 2>/dev/null | cut -d' ' -f1 | cut -d'.' -f1)
-UPTIME_MIN=$((UPTIME_SEC / 60))
 
-# Check internet
-INTERNET="✗"
-if wget -q -O /dev/null --timeout=3 http://dl-cdn.alpinelinux.org/alpine/MIRRORS.txt 2>/dev/null; then
-    INTERNET="✓"
-fi
+_kver_s=$(uname -r | cut -d- -f1)
+_mem_mb=$(awk '/^MemTotal:/{printf "%.0f",$2/1024}' /proc/meminfo)
+_mem_free=$(awk '/^MemAvailable:/{printf "%.0f",$2/1024}' /proc/meminfo)
+_cpus=$(nproc)
+_uptime=$(( $(cut -d. -f1 /proc/uptime) / 60 ))
+_disk_used=$(df -BG / 2>/dev/null | awk 'NR==2{gsub(/G/,"",$3);print $3}')
+_disk_total=$(df -BG / 2>/dev/null | awk 'NR==2{gsub(/G/,"",$2);print $2}')
 
-# ── Enhanced MOTD ───────────────────────────────────────────────────────────
 if [ "$SSH_ENABLED" = "1" ] && [ -n "$ANDROID_IP" ]; then
-    SSH_INFO="
+    _ssh_block="
 ┌────────────────────────────────────────────────────────────┐
-│  SSH Access                                                │
-│  ssh root@${ANDROID_IP} -p 9922                            │
-│  Password: podroid                                         │
+│  SSH: ssh root@${ANDROID_IP} -p 9922   pass: podroid       │
 └────────────────────────────────────────────────────────────┘"
 else
-    SSH_INFO=""
+    _ssh_block=""
 fi
 
+# __NET__ is replaced asynchronously once the internet check completes
 cat > /etc/motd <<MOTD
 
  ╔══════════════════════════════════════════════════════════╗
- ║  Podroid - Alpine Linux Container Runtime                ║
+ ║  Podroid · Alpine Linux Container Runtime                ║
  ╚══════════════════════════════════════════════════════════╝
 
- 📦 System
-    Alpine: ${KVER_SHORT}    CPU: ${CPUS} cores    Memory: ${MEM_AVAIL}/${MEM_MB} MB
-    Disk: ${STORAGE_USED}/${STORAGE_TOTAL} GB    Net: ${INTERNET}    Uptime: ${UPTIME_MIN}m
-
- 🐳 Quick Start
-    podman run -it alpine sh              # Interactive shell
-    podman run -d -p 8080:80 nginx        # Run nginx
-    podman ps -a                          # List containers
-
-${SSH_INFO}
+ 📦  Alpine ${_kver_s}  ·  ${_cpus} CPU  ·  ${_mem_free}/${_mem_mb} MB RAM  ·  ${_disk_used}/${_disk_total} GB  ·  Up ${_uptime}m
+     Net: __NET__
+${_ssh_block}
+ 🐳  podman run -it --rm alpine        # interactive shell
+     podman run -d -p 8080:80 nginx    # background service
+     podman ps -a                      # list containers
 
 MOTD
 
-# ── Profile ───────────────────────────────────────────────────────────────────
+{ wget -q -O /dev/null --timeout=2 http://dl-cdn.alpinelinux.org/alpine/MIRRORS.txt 2>/dev/null \
+    && sed -i 's/__NET__/✓ internet/' /etc/motd \
+    || sed -i 's/__NET__/✗ offline/'  /etc/motd; } &
+
 cat > /etc/profile <<'PROF'
-export HOME=/root
-export SHELL=/bin/bash
+export HOME=/root SHELL=/bin/bash
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-export TERM=xterm-256color
-export LANG=C.UTF-8
-export LC_ALL=C.UTF-8
-export CHARSET=UTF-8
+export TERM=xterm-256color LANG=C.UTF-8 LC_ALL=C.UTF-8 CHARSET=UTF-8
 export PODMAN_IGNORE_CGROUPSV1_WARNING=1
 export CONTAINERS_CONF=/etc/containers/containers.conf
 export CONTAINERS_STORAGE_CONF=/etc/containers/storage.conf
@@ -287,62 +254,32 @@ export CONTAINERS_REGISTRIES_CONF=/etc/containers/registries.conf
 stty -ixon -ixoff -iexten -echoctl 2>/dev/null
 set +o checkwinsize 2>/dev/null
 
-alias ls='ls --color=auto'
-alias ll='ls -lah --color=auto'
-alias la='ls -A --color=auto'
-alias grep='grep --color=auto'
-alias df='df -h'
-alias free='free -m'
-alias ip='ip -c'
-alias less='less -R'
-alias dps='podman ps -a'
-alias di='podman images'
-alias dlogs='podman logs -f'
-alias dexec='podman exec -it'
-alias drun='podman run --rm -it'
-alias dstop='podman stop'
-alias drm='podman rm'
-alias drmi='podman rmi'
-alias dstats='podman stats'
+alias ls='ls --color=auto'  ll='ls -lah --color=auto'  la='ls -A --color=auto'
+alias grep='grep --color=auto'  df='df -h'  free='free -m'  ip='ip -c'  less='less -R'
+alias dps='podman ps -a'  di='podman images'  dlogs='podman logs -f'
+alias dexec='podman exec -it'  drun='podman run --rm -it'
+alias dstop='podman stop'  drm='podman rm'  drmi='podman rmi'  dstats='podman stats'
 
 PS1='\[\e[1;32m\]➜\[\e[0m\] \[\e[1;34m\]\w\[\e[0m\] \[\e[1;31m\]#\[\e[0m\] '
-
 cd /root 2>/dev/null
 PROF
 
-# ── Resize control daemon ────────────────────────────────────────────────────
-(
-    for i in $(seq 1 30); do
-        [ -c /dev/hvc0 ] && break
-        sleep 1
-    done
-    [ -c /dev/hvc0 ] || exit 0
-    while IFS= read -r line; do
-        case "$line" in
-            RESIZE\ *)
-                set -- $line
-                stty rows "$2" cols "$3" < /dev/ttyAMA0 2>/dev/null
-                ;;
-        esac
-    done < /dev/hvc0
-) &
-
-# ── Login wrapper (nvim fix: script allocates a real PTY so TUI apps work) ───
-mkdir -p /usr/local/bin
+# ── Login wrapper ─────────────────────────────────────────────────────────────
 cat > /usr/local/bin/podroid-login <<'LOGIN'
 #!/bin/bash
 cat /etc/motd 2>/dev/null
 exec /usr/bin/script -q -c 'exec /bin/bash --login' /dev/null
 LOGIN
 chmod +x /usr/local/bin/podroid-login
-grep -q '^root:' /etc/passwd 2>/dev/null || echo "root:x:0:0:root:/root:/bin/bash" > /etc/passwd
+grep -q '^root:' /etc/passwd 2>/dev/null || \
+    printf 'root:x:0:0:root:/root:/bin/bash\n' > /etc/passwd
 
 boot_stage "Ready!"
 rm -f /run/boot_stage
 
-# Give the Android boot monitor 2 seconds to read "Ready!" before
-# the bridge takes over the serial socket (serial.sock is single-client).
-sleep 2
+# Hand off serial.sock to bridge — monitor reads "Ready!" then disconnects;
+# single-client socket requires this gap before getty takes over.
+sleep 0.5
 
 while true; do
     /sbin/getty -n -l /usr/local/bin/podroid-login 0 ttyAMA0 xterm-256color
@@ -351,68 +288,52 @@ done
 fi
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Phase 1: Early init — mount persistent storage and pivot to overlay
-# Uses chroot (with proper devpts setup for PTY support)
+# Phase 1: Early init — mount persistent overlay and pivot
 # ══════════════════════════════════════════════════════════════════════════════
 
-mount -t proc proc /proc -o noexec,nosuid,nodev 2>/dev/null
-mount -t sysfs sys /sys -o noexec,nosuid,nodev 2>/dev/null
-mount -t devtmpfs devtmpfs /dev -o exec,nosuid,mode=0755,size=2M 2>/dev/null || \
-    mount -t tmpfs tmpfs /dev -o exec,nosuid,mode=0755,size=2M 2>/dev/null
+mount -t proc    proc      /proc  -o noexec,nosuid,nodev 2>/dev/null
+mount -t sysfs   sys       /sys   -o noexec,nosuid,nodev 2>/dev/null
+mount -t devtmpfs devtmpfs /dev   -o exec,nosuid,mode=0755,size=2M 2>/dev/null || \
+    mount -t tmpfs tmpfs   /dev   -o exec,nosuid,mode=0755,size=2M 2>/dev/null
 
-KVER=$(uname -r)
-if [ -d "/lib/modules/$KVER" ]; then
-    depmod -a 2>/dev/null
-    modprobe virtio_blk 2>/dev/null
-fi
+_kver=$(uname -r)
+[ -d "/lib/modules/$_kver" ] && { depmod -a 2>/dev/null; modprobe virtio_blk 2>/dev/null; }
 
 echo 1 > /proc/sys/kernel/printk 2>/dev/null
 
-echo "  ╔═══════════════════════════════════════════╗"
-echo "  ║   Podroid VM is starting...             ║"
-echo "  ║   Please wait...                        ║"
-echo "  ╚═══════════════════════════════════════════╝"
-echo ""
+printf '  ╔═══════════════════════════════════════════╗\n'
+printf '  ║   Podroid VM is starting...             ║\n'
+printf '  ║   Please wait...                        ║\n'
+printf '  ╚═══════════════════════════════════════════╝\n\n'
 
-mkdir -p /mnt/persist
-PERSIST_DEV=""
-for dev in /dev/vda /dev/vdb; do
-    [ -b "$dev" ] || continue
-    PERSIST_DEV="$dev"
+mkdir -p /mnt/persist /mnt/overlay 2>/dev/null
+
+for _dev in /dev/vda /dev/vdb /dev/vdc; do
+    [ -b "$_dev" ] || continue
+    if ! mount -t ext4 -o rw,noatime "$_dev" /mnt/persist 2>/dev/null; then
+        /bin/busybox --install -s 2>/dev/null
+        e2fsck -y "$_dev" >/dev/null 2>&1
+        if ! mount -t ext4 -o rw,noatime "$_dev" /mnt/persist 2>/dev/null; then
+            mkfs.ext4 -q -F "$_dev" >/dev/null 2>&1
+            mount -t ext4 -o rw,noatime "$_dev" /mnt/persist 2>/dev/null || continue
+        fi
+    fi
     break
 done
 
-if [ -n "$PERSIST_DEV" ]; then
-    if ! mount -t ext4 -o rw,noatime "$PERSIST_DEV" /mnt/persist 2>/dev/null; then
-        /bin/busybox --install -s 2>/dev/null
-        e2fsck -y "$PERSIST_DEV" >/dev/null 2>&1
-        if ! mount -t ext4 -o rw,noatime "$PERSIST_DEV" /mnt/persist 2>/dev/null; then
-            mkfs.ext4 -q -F "$PERSIST_DEV" >/dev/null 2>&1
-            mount -t ext4 -o rw,noatime "$PERSIST_DEV" /mnt/persist 2>/dev/null
-        fi
-    fi
-
-    if mountpoint -q /mnt/persist 2>/dev/null; then
-        mkdir -p /mnt/persist/upper /mnt/persist/work /mnt/overlay
-
-        mount -t overlay overlay \
-            -o lowerdir=/,upperdir=/mnt/persist/upper,workdir=/mnt/persist/work \
-            /mnt/overlay 2>/dev/null
-
-        if mountpoint -q /mnt/overlay 2>/dev/null; then
-            mkdir -p /mnt/overlay/mnt/persist
-            mount --bind /mnt/persist /mnt/overlay/mnt/persist
-            touch /mnt/persist/.overlay-active
-
-            umount /dev 2>/dev/null
-            umount /sys 2>/dev/null
-            umount /proc 2>/dev/null
-            exec chroot /mnt/overlay /init --main
-        fi
+if mountpoint -q /mnt/persist 2>/dev/null; then
+    mkdir -p /mnt/persist/upper /mnt/persist/work 2>/dev/null
+    if mount -t overlay overlay \
+        -o lowerdir=/,upperdir=/mnt/persist/upper,workdir=/mnt/persist/work \
+        /mnt/overlay 2>/dev/null; then
+        mkdir -p /mnt/overlay/mnt/persist 2>/dev/null
+        mount --bind /mnt/persist /mnt/overlay/mnt/persist 2>/dev/null
+        touch /mnt/persist/.overlay-active 2>/dev/null
+        umount /dev /sys /proc 2>/dev/null
+        exec /bin/busybox chroot /mnt/overlay /init --main
     fi
 fi
 
-umount /dev 2>/dev/null
-umount /sys 2>/dev/null
-umount /proc 2>/dev/null
-exec chroot /mnt/overlay /init --main
+# Fallback: boot without persistent storage (writes go to initramfs tmpfs)
+umount /dev /sys /proc 2>/dev/null
+exec /init --main

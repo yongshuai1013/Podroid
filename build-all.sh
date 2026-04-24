@@ -29,8 +29,9 @@ Podroid Unified Build Tool
 Usage: $0 [command] [options]
 
 Commands:
-  all           Build everything (Initramfs, QEMU, Termux JNI, APK)
-  initramfs     Build Alpine VM initramfs (vmlinuz + initrd)
+  all           Build everything (Kernel, Initramfs, QEMU, Termux JNI, APK)
+  kernel        Build custom kernel only (podroid_kernel.config + Linux source)
+  initramfs     Build custom kernel + Alpine VM initramfs (vmlinuz + initrd)
   qemu          Build QEMU + podroid-bridge
   termux        Build libtermux.so (16KB page aligned)
   apk           Build the Android APK
@@ -83,10 +84,30 @@ EOF
 
 # ── Build Functions ───────────────────────────────────────────────────────────
 
+build_kernel() {
+    local kernel_ver
+    kernel_ver=$(grep -E '^podroidKernelVersion=' "${SCRIPT_DIR}/gradle.properties" | cut -d= -f2)
+    log "Building custom kernel ${kernel_ver} for aarch64 (Docker)..."
+    docker build --network=host \
+        --build-arg "KERNEL_VERSION=${kernel_ver}" \
+        -t podroid-kernel-builder --target kernel-builder "$SCRIPT_DIR"
+    log "Extracting kernel artifact..."
+    docker rm -f podroid-kernel-extract 2>/dev/null || true
+    docker create --name podroid-kernel-extract podroid-kernel-builder
+    mkdir -p "$ASSETS"
+    docker cp podroid-kernel-extract:/output/vmlinuz-virt "$ASSETS/vmlinuz-virt"
+    docker rm podroid-kernel-extract >/dev/null
+    success "Custom kernel ready."
+}
+
 build_initramfs() {
-    log "Building Alpine Initramfs (Docker)..."
-    docker build -t podroid-builder --target packer "$SCRIPT_DIR"
-    
+    local kernel_ver
+    kernel_ver=$(grep -E '^podroidKernelVersion=' "${SCRIPT_DIR}/gradle.properties" | cut -d= -f2)
+    log "Building custom kernel + Alpine Initramfs (Docker)..."
+    docker build --network=host \
+        --build-arg "KERNEL_VERSION=${kernel_ver}" \
+        -t podroid-builder --target packer "$SCRIPT_DIR"
+
     log "Extracting initramfs artifacts..."
     docker rm podroid-extract 2>/dev/null || true
     docker create --name podroid-extract podroid-builder /bin/true
@@ -94,7 +115,7 @@ build_initramfs() {
     docker cp podroid-extract:/output/vmlinuz-virt "$ASSETS/vmlinuz-virt"
     docker cp podroid-extract:/output/initrd.img "$ASSETS/initrd.img"
     docker rm podroid-extract >/dev/null
-    success "Initramfs ready."
+    success "Kernel + initramfs ready."
 }
 
 build_qemu() {
@@ -107,7 +128,7 @@ build_qemu() {
         
     log "Extracting QEMU artifacts..."
     docker rm -f podroid-qemu-extract 2>/dev/null || true
-    docker create --name podroid-qemu-extract podroid-qemu-builder
+    docker create --name podroid-qemu-extract podroid-qemu-builder /bin/true
     
     mkdir -p "$JNILIBS" "$ASSETS/qemu/keymaps"
     docker cp podroid-qemu-extract:/libqemu-system-aarch64.so "$JNILIBS/"
@@ -232,6 +253,7 @@ FAST=false
 for arg in "$@"; do [ "$arg" == "--fast" ] && FAST=true; done
 
 case "$1" in
+    kernel)    build_kernel ;;
     initramfs) build_initramfs ;;
     qemu)      build_qemu ;;
     termux)    build_termux ;;

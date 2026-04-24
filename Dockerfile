@@ -1,7 +1,45 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # Podroid Unified Dockerfile
-# Combines Initramfs (Alpine VM) and QEMU (Android ARM64) build stages.
+# Combines Custom Kernel, Initramfs (Alpine VM) and QEMU (Android ARM64) builds.
 # ─────────────────────────────────────────────────────────────────────────────
+
+# ==============================================================================
+# SECTION 0: Custom Kernel Build (aarch64) — Image + modules
+# ==============================================================================
+FROM debian:bookworm AS kernel-builder
+ARG KERNEL_VERSION=6.6.87
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    wget ca-certificates xz-utils make gcc gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
+    bc bison flex libssl-dev libelf-dev python3 kmod cpio \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+RUN wget -q https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-${KERNEL_VERSION}.tar.xz \
+    && tar xf linux-${KERNEL_VERSION}.tar.xz \
+    && rm linux-${KERNEL_VERSION}.tar.xz
+
+COPY podroid_kernel.config /tmp/podroid_kernel.config
+RUN cd linux-${KERNEL_VERSION} \
+    && make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- defconfig \
+    && ./scripts/kconfig/merge_config.sh -m .config /tmp/podroid_kernel.config \
+    && make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- olddefconfig \
+    && make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- -j$(nproc) Image.gz modules
+
+RUN cd linux-${KERNEL_VERSION} \
+    && make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
+       INSTALL_MOD_PATH=/modules INSTALL_MOD_STRIP=1 modules_install \
+    && rm -f /modules/lib/modules/*/build /modules/lib/modules/*/source
+# Keep only modules init-podroid actually uses; everything else (DSA, pinctrl,
+# mediatek, renesas, hardware-specific drivers) is dead weight in a VM.
+# init-podroid runs `depmod -a` at boot so we don't need to regenerate modules.dep here.
+RUN cd /modules/lib/modules/*/kernel \
+    && find . -name '*.ko' | grep -vE '(^\./net/(bridge|netfilter|9p|ipv4/netfilter|ipv6/netfilter)/|^\./fs/(9p|fuse|overlayfs)/|^\./drivers/net/(tun|veth|virtio_net)\.ko|^\./drivers/block/virtio_blk\.ko|^\./drivers/char/hw_random/virtio-rng\.ko|^\./drivers/virtio/)' \
+    | xargs rm -f \
+    && find . -type d -empty -delete
+
+RUN mkdir -p /output \
+    && cp linux-${KERNEL_VERSION}/arch/arm64/boot/Image.gz /output/vmlinuz-virt
 
 # ==============================================================================
 # SECTION 1: Initramfs (Alpine VM) Build
@@ -16,25 +54,27 @@ RUN wget -q https://dl-cdn.alpinelinux.org/alpine/v3.23/releases/aarch64/alpine-
 RUN wget -q https://dl-cdn.alpinelinux.org/alpine/v3.23/releases/aarch64/alpine-virt-3.23.3-aarch64.iso \
     && mkdir -p /iso && xorriso -osirrox on -indev alpine-virt-3.23.3-aarch64.iso -extract / /iso 2>/dev/null || true
 
-# Stage 2: Build the custom rootfs (aarch64)
+# Stage 2: Build the custom rootfs (aarch64) — no linux-virt; modules come from kernel-builder
 FROM --platform=linux/arm64/v8 alpine:3.23 AS rootfs-builder
 RUN apk update && apk add --no-cache \
-    linux-virt bash busybox busybox-extras ttyd podman podman-remote \
+    bash busybox busybox-extras ttyd podman podman-remote \
     netavark aardvark-dns fuse-overlayfs slirp4netns iptables ip6tables \
     shadow-uidmap ca-certificates crun curl e2fsprogs util-linux openrc \
-    dropbear ncurses-terminfo-base musl-locales
+    dropbear ncurses-terminfo-base musl-locales kmod
 COPY init-podroid /init
 RUN chmod +x /init
-RUN VER=$(apk info -ve linux-virt | head -1 | sed 's/^linux-virt-//') && \
-    sed -i "s/^linux-virt$/linux-virt=$VER/" /etc/apk/world
 RUN rm -rf /var/cache/apk/* /tmp/* /var/tmp/* /usr/share/man /usr/share/doc
 
 # Stage 3: Pack Initramfs
 FROM alpine:3.23 AS packer
 RUN apk add --no-cache cpio gzip findutils
-COPY --from=rootfs-builder /boot/vmlinuz-virt /output/vmlinuz-virt
+COPY --from=kernel-builder /output/vmlinuz-virt /output/vmlinuz-virt
 COPY --from=rootfs-builder / /rootfs/
-RUN rm -rf /rootfs/proc/* /rootfs/sys/* /rootfs/dev/* /rootfs/run/* /rootfs/tmp/* /rootfs/boot
+# Install kernel modules matching the custom kernel
+COPY --from=kernel-builder /modules/lib/modules /rootfs/lib/modules
+# Strip ephemeral dirs and boot dir
+RUN rm -rf /rootfs/proc/* /rootfs/sys/* /rootfs/dev/* /rootfs/run/* \
+           /rootfs/tmp/* /rootfs/boot
 RUN cd /rootfs && find . | cpio -o -H newc 2>/dev/null | gzip -9 > /output/initrd.img
 
 # ==============================================================================
@@ -96,11 +136,23 @@ RUN wget -q https://download.savannah.gnu.org/releases/attr/attr-2.5.2.tar.gz &&
 RUN git clone --depth=1 https://github.com/kaniini/libucontext.git /tmp/libucontext && make -C /tmp/libucontext ARCH=aarch64 CC="${CC}" EXPORT_UNPREFIXED=yes && install -Dm644 /tmp/libucontext/libucontext.a ${PREFIX}/lib/libucontext.a && install -Dm644 /tmp/libucontext/include/libucontext/libucontext.h ${PREFIX}/include/libucontext/libucontext.h && install -Dm644 /tmp/libucontext/arch/common/include/libucontext/bits.h ${PREFIX}/include/libucontext/bits.h \
     && printf '#ifndef PODROID_UCONTEXT_SHIM_H\n#define PODROID_UCONTEXT_SHIM_H\n#include_next <ucontext.h>\n#include <libucontext/libucontext.h>\n#define getcontext libucontext_getcontext\n#define makecontext libucontext_makecontext\n#define setcontext libucontext_setcontext\n#define swapcontext libucontext_swapcontext\n#endif\n' > ${PREFIX}/include/ucontext.h
 
-# QEMU Build
+# QEMU Build (committed flags — no LTO, no -O3 — plus minimal Android compat patches)
 RUN wget -q https://download.qemu.org/${QEMU_DIR}.tar.xz && tar xf ${QEMU_DIR}.tar.xz
 RUN sed -i "s/rt = cc.find_library('rt', required: true)/rt = cc.find_library('rt', required: false)/" ${QEMU_DIR}/meson.build
 RUN printf '#undef st_atime_nsec\n#undef st_mtime_nsec\n#undef st_ctime_nsec\n' | cat - ${QEMU_DIR}/fsdev/9p-marshal.h > /tmp/9p-marshal.h && mv /tmp/9p-marshal.h ${QEMU_DIR}/fsdev/9p-marshal.h
-RUN cd ${QEMU_DIR} && ./configure --cc="${CC}" --cross-prefix="${LLVM}/bin/llvm-" --extra-cflags="-fPIC -DANDROID -I${PREFIX}/include -I${PREFIX}/include/glib-2.0 -I${PREFIX}/lib/glib-2.0/include" --extra-ldflags="-L${PREFIX}/lib -Wl,-z,max-page-size=16384 ${PREFIX}/lib/libucontext.a" --prefix=/opt/qemu-out --target-list=aarch64-softmmu --enable-tcg --enable-slirp --enable-virtfs --enable-pie --disable-docs --disable-gtk --disable-sdl --disable-vnc --disable-vhost-user --with-coroutine=ucontext && make -j$(nproc) install
+# ivshmem-{server,client} also call shm_open; stub their meson.build files since we don't ship them
+RUN printf '# disabled for Android Bionic\n' > ${QEMU_DIR}/contrib/ivshmem-server/meson.build \
+    && printf '# disabled for Android Bionic\n' > ${QEMU_DIR}/contrib/ivshmem-client/meson.build
+# shm_open/shm_unlink are absent from the NDK API-28 stubs.
+# Shim header: forward-declares them for all QEMU TUs.
+# libshm.a: provides an implementation via memfd_create (works on all Android 8+ kernels).
+RUN printf '#ifndef PODROID_SHM_SHIM_H\n#define PODROID_SHM_SHIM_H\nextern int shm_open(const char *, int, unsigned);\nextern int shm_unlink(const char *);\n#endif\n' \
+    > /opt/shm_shim.h
+RUN printf '#include <sys/syscall.h>\n#include <unistd.h>\n#include <errno.h>\n#ifndef SYS_memfd_create\n#define SYS_memfd_create 279\n#endif\nint shm_open(const char *n, int f, unsigned m) {\n    (void)f; (void)m;\n    while (*n == '"'"'/'"'"') n++;\n    long fd = syscall(SYS_memfd_create, n, 0);\n    if (fd < 0) { errno = (int)(-fd); return -1; }\n    return (int)fd;\n}\nint shm_unlink(const char *n) { (void)n; return 0; }\n' \
+    > /tmp/shm_stub.c \
+    && ${CC} --sysroot=${LLVM}/sysroot -target aarch64-linux-android28 -c /tmp/shm_stub.c -o /tmp/shm_stub.o \
+    && ${AR} rcs ${PREFIX}/lib/libshm.a /tmp/shm_stub.o
+RUN cd ${QEMU_DIR} && ./configure --cc="${CC}" --cross-prefix="${LLVM}/bin/llvm-" --extra-cflags="-fPIC -DANDROID -include /opt/shm_shim.h -I${PREFIX}/include -I${PREFIX}/include/glib-2.0 -I${PREFIX}/lib/glib-2.0/include" --extra-ldflags="-L${PREFIX}/lib -Wl,-z,max-page-size=16384 ${PREFIX}/lib/libucontext.a ${PREFIX}/lib/libshm.a" --prefix=/opt/qemu-out --target-list=aarch64-softmmu --enable-tcg --enable-slirp --enable-virtfs --enable-pie --disable-docs --disable-gtk --disable-sdl --disable-vnc --disable-vhost-user --disable-plugins --with-coroutine=ucontext && make -j$(nproc) install
 
 # Bridge
 COPY podroid-bridge.c /tmp/podroid-bridge.c
