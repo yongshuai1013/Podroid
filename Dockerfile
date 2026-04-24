@@ -20,10 +20,72 @@ RUN wget -q https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-${KERNEL_VERSION}
     && rm linux-${KERNEL_VERSION}.tar.xz
 
 COPY podroid_kernel.config /tmp/podroid_kernel.config
+# Force-builtin fragment: options netavark + podman need as =y so there's no
+# modprobe round-trip (modules caused silent failures in the past). Applied
+# WITHOUT -m on top of the main fragment, then locked in with olddefconfig.
+RUN printf '%s\n' \
+    'CONFIG_IPV6=y' \
+    'CONFIG_BRIDGE=y' \
+    'CONFIG_BRIDGE_NETFILTER=y' \
+    'CONFIG_BRIDGE_VLAN_FILTERING=y' \
+    'CONFIG_VLAN_8021Q=y' \
+    'CONFIG_STP=y' \
+    'CONFIG_LLC=y' \
+    'CONFIG_VETH=y' \
+    'CONFIG_TUN=y' \
+    'CONFIG_DUMMY=y' \
+    'CONFIG_NETFILTER=y' \
+    'CONFIG_NETFILTER_ADVANCED=y' \
+    'CONFIG_NETFILTER_NETLINK=y' \
+    'CONFIG_NF_CONNTRACK=y' \
+    'CONFIG_NF_CONNTRACK_NETLINK=y' \
+    'CONFIG_NF_NAT=y' \
+    'CONFIG_NF_TABLES=y' \
+    'CONFIG_NF_TABLES_INET=y' \
+    'CONFIG_NF_TABLES_IPV4=y' \
+    'CONFIG_NF_TABLES_IPV6=y' \
+    'CONFIG_NF_TABLES_BRIDGE=y' \
+    'CONFIG_NFT_NAT=y' \
+    'CONFIG_NFT_MASQ=y' \
+    'CONFIG_NFT_CT=y' \
+    'CONFIG_NFT_COMPAT=y' \
+    'CONFIG_NF_NAT_MASQUERADE=y' \
+    'CONFIG_IP_NF_IPTABLES=y' \
+    'CONFIG_IP_NF_FILTER=y' \
+    'CONFIG_IP_NF_NAT=y' \
+    'CONFIG_IP_NF_TARGET_MASQUERADE=y' \
+    'CONFIG_IP6_NF_IPTABLES=y' \
+    'CONFIG_IP6_NF_FILTER=y' \
+    'CONFIG_IP6_NF_NAT=y' \
+    'CONFIG_IP6_NF_TARGET_MASQUERADE=y' \
+    'CONFIG_NETFILTER_XTABLES=y' \
+    'CONFIG_NETFILTER_XT_MATCH_ADDRTYPE=y' \
+    'CONFIG_NETFILTER_XT_MATCH_CONNTRACK=y' \
+    'CONFIG_NETFILTER_XT_MATCH_MARK=y' \
+    'CONFIG_NETFILTER_XT_MATCH_COMMENT=y' \
+    'CONFIG_NETFILTER_XT_TARGET_MASQUERADE=y' \
+    'CONFIG_NETFILTER_XT_TARGET_REDIRECT=y' \
+    'CONFIG_NETFILTER_XT_TARGET_MARK=y' \
+    'CONFIG_OVERLAY_FS=y' \
+    'CONFIG_FUSE_FS=y' \
+    > /tmp/forced_builtin.config
 RUN cd linux-${KERNEL_VERSION} \
     && make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- defconfig \
     && ./scripts/kconfig/merge_config.sh -m .config /tmp/podroid_kernel.config \
+    && ./scripts/kconfig/merge_config.sh -m .config /tmp/forced_builtin.config \
     && make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- olddefconfig \
+    && echo "=== verifying critical options are =y ===" \
+    && for opt in IPV6 BRIDGE BRIDGE_NETFILTER NF_TABLES_BRIDGE \
+                  IP6_NF_IPTABLES IP6_NF_FILTER IP6_NF_NAT \
+                  IP_NF_TARGET_MASQUERADE IP6_NF_TARGET_MASQUERADE \
+                  NETFILTER_XT_TARGET_MASQUERADE NF_NAT_MASQUERADE \
+                  NFT_COMPAT NFT_MASQ NFT_NAT \
+                  VETH TUN NF_TABLES NF_NAT NETFILTER OVERLAY_FS FUSE_FS; do \
+           grep -q "^CONFIG_${opt}=y\$" .config \
+               || { echo "FATAL: CONFIG_${opt} is not =y after merge" >&2; \
+                    grep "CONFIG_${opt}" .config >&2; exit 1; }; \
+       done \
+    && echo "=== all critical options are built-in ===" \
     && make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- -j$(nproc) Image.gz modules
 
 RUN cd linux-${KERNEL_VERSION} \
@@ -57,10 +119,10 @@ RUN wget -q https://dl-cdn.alpinelinux.org/alpine/v3.23/releases/aarch64/alpine-
 # Stage 2: Build the custom rootfs (aarch64) — no linux-virt; modules come from kernel-builder
 FROM --platform=linux/arm64/v8 alpine:3.23 AS rootfs-builder
 RUN apk update && apk add --no-cache \
-    bash busybox busybox-extras ttyd podman podman-remote \
+    bash busybox busybox-extras ttyd podman \
     netavark aardvark-dns fuse-overlayfs slirp4netns iptables ip6tables \
     shadow-uidmap ca-certificates crun curl e2fsprogs util-linux openrc \
-    dropbear ncurses-terminfo-base musl-locales kmod
+    dropbear ncurses-terminfo-base musl-locales kmod fastfetch
 COPY init-podroid /init
 RUN chmod +x /init
 RUN rm -rf /var/cache/apk/* /tmp/* /var/tmp/* /usr/share/man /usr/share/doc
