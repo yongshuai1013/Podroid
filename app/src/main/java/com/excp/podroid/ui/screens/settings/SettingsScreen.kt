@@ -1,5 +1,10 @@
 package com.excp.podroid.ui.screens.settings
 
+import android.content.Intent
+import android.net.Uri
+import android.os.Build
+import android.os.Environment
+import android.provider.Settings
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -49,6 +54,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
@@ -78,6 +84,7 @@ fun SettingsScreen(
     val vmCpus by viewModel.vmCpus.collectAsStateWithLifecycle()
     val storageSizeGb by viewModel.storageSizeGb.collectAsStateWithLifecycle()
     val sshEnabled by viewModel.sshEnabled.collectAsStateWithLifecycle(false)
+    val storageAccessEnabled by viewModel.storageAccessEnabled.collectAsStateWithLifecycle(false)
     val qemuExtraArgs by viewModel.qemuExtraArgs.collectAsStateWithLifecycle()
     val kernelExtraCmdline by viewModel.kernelExtraCmdline.collectAsStateWithLifecycle()
     var advancedExpanded by remember { mutableStateOf(false) }
@@ -206,6 +213,12 @@ fun SettingsScreen(
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(top = 2.dp, bottom = 8.dp),
+            )
+
+            DownloadsSharingCard(
+                enabled = storageAccessEnabled,
+                vmNotRunning = vmNotRunning,
+                onToggle = { viewModel.setStorageAccessEnabled(it) },
             )
 
             Spacer(Modifier.height(16.dp))
@@ -631,6 +644,106 @@ private fun SettingsInfoRow(label: String, value: String) {
     }
 }
 
+/**
+ * Mirrors the setup-wizard's storage-access card: toggle, "may crash the VM"
+ * warning, and a permission-grant button when MANAGE_EXTERNAL_STORAGE isn't held.
+ */
+@Composable
+private fun DownloadsSharingCard(
+    enabled: Boolean,
+    vmNotRunning: Boolean,
+    onToggle: (Boolean) -> Unit,
+) {
+    val context = LocalContext.current
+    val canManageAllFiles = Build.VERSION.SDK_INT >= Build.VERSION_CODES.R
+    val hasStoragePermission = !canManageAllFiles || Environment.isExternalStorageManager()
+
+    fun openAllFilesAccessSettings() {
+        context.startActivity(
+            Intent(
+                Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
+                Uri.parse("package:${context.packageName}"),
+            )
+        )
+    }
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant,
+        ),
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "Downloads sharing",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        text = if (enabled)
+                            "Mounted as /mnt/downloads in the VM via virtio-9p."
+                        else
+                            "Share the Android Downloads folder with the VM.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Spacer(Modifier.width(12.dp))
+                Switch(
+                    checked = enabled,
+                    onCheckedChange = { checked ->
+                        onToggle(checked)
+                        // Mirror SetupScreen behavior: when the user enables sharing
+                        // and we're on R+ without MANAGE_EXTERNAL_STORAGE held, jump
+                        // straight to the system grant screen so they can flip it.
+                        if (checked && canManageAllFiles && !Environment.isExternalStorageManager()) {
+                            openAllFilesAccessSettings()
+                        }
+                    },
+                )
+            }
+
+            Spacer(Modifier.height(12.dp))
+            Text(
+                text = "On some devices this may crash the VM.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.error,
+                fontWeight = FontWeight.SemiBold,
+            )
+
+            if (enabled && canManageAllFiles && !hasStoragePermission) {
+                Spacer(Modifier.height(12.dp))
+                FilledTonalButton(onClick = ::openAllFilesAccessSettings) {
+                    Text("Grant storage access")
+                }
+            } else if (enabled && canManageAllFiles) {
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    text = if (hasStoragePermission) "All files access granted." else "All files access not granted.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+
+            if (!vmNotRunning) {
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    text = "Restart the VM for changes to take effect.",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.error,
+                )
+            }
+        }
+    }
+}
+
 @Composable
 private fun AdvancedTextSetting(
     label: String,
@@ -641,21 +754,29 @@ private fun AdvancedTextSetting(
     onReset: () -> Unit,
     minLines: Int,
 ) {
+    // Editing is local; we only persist when the field loses focus. Avoids
+    // round-tripping every keystroke through DataStore on a multi-line config field.
     var localValue by remember(value) { mutableStateOf(value) }
+    var hadFocus by remember { mutableStateOf(false) }
 
     Column(modifier = Modifier.fillMaxWidth()) {
         OutlinedTextField(
             value = localValue,
-            onValueChange = {
-                localValue = it
-                onValueChange(it)
-            },
+            onValueChange = { localValue = it },
             label = { Text(label) },
             enabled = enabled,
             singleLine = false,
             minLines = minLines,
             textStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier
+                .fillMaxWidth()
+                .onFocusChanged { state ->
+                    if (state.isFocused) {
+                        hadFocus = true
+                    } else if (hadFocus && localValue != value) {
+                        onValueChange(localValue)
+                    }
+                },
         )
         Row(
             modifier = Modifier
@@ -669,10 +790,7 @@ private fun AdvancedTextSetting(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.weight(1f),
             )
-            TextButton(
-                onClick = onReset,
-                enabled = enabled,
-            ) {
+            TextButton(onClick = onReset, enabled = enabled) {
                 Text("Reset")
             }
         }

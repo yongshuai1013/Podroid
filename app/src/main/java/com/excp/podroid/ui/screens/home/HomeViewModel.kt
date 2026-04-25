@@ -33,8 +33,9 @@ class HomeViewModel @Inject constructor(
     val vmState: StateFlow<VmState> = podroidQemu.state
         .stateIn(viewModelScope, SharingStarted.Eagerly, VmState.Idle)
 
+    // Eagerly so a brief detour to Settings while booting doesn't drop progress updates.
     val bootStage: StateFlow<String> = podroidQemu.bootStage
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), "")
+        .stateIn(viewModelScope, SharingStarted.Eagerly, "")
 
     val storageAccessEnabled: StateFlow<Boolean> = settingsRepository.storageAccessEnabled
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), false)

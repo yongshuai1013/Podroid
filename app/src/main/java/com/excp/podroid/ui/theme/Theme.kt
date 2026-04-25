@@ -30,17 +30,18 @@ private val LightColorScheme = lightColorScheme(
 
 @Composable
 fun PodroidTheme(
-    darkTheme: Boolean = isSystemInDarkTheme(),
+    darkTheme: Boolean? = null,
     dynamicColor: Boolean = true,
     content: @Composable () -> Unit,
 ) {
+    val effectiveDark = darkTheme ?: isSystemInDarkTheme()
     val colorScheme = when {
         dynamicColor && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S -> {
             val context = LocalContext.current
-            if (darkTheme) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
+            if (effectiveDark) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
         }
-        darkTheme -> DarkColorScheme
-        else      -> LightColorScheme
+        effectiveDark -> DarkColorScheme
+        else          -> LightColorScheme
     }
 
     MaterialTheme(

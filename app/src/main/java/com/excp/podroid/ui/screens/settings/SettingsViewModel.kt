@@ -18,6 +18,7 @@ import com.excp.podroid.data.repository.PortForwardRule
 import com.excp.podroid.data.repository.SettingsRepository
 import com.excp.podroid.engine.PodroidQemu
 import com.excp.podroid.engine.VmState
+import com.excp.podroid.util.NetworkUtils
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
@@ -89,6 +90,12 @@ class SettingsViewModel @Inject constructor(
         viewModelScope.launch { settingsRepository.setSshEnabled(value) }
     }
 
+    val storageAccessEnabled: Flow<Boolean> = settingsRepository.storageAccessEnabled
+
+    fun setStorageAccessEnabled(value: Boolean) {
+        viewModelScope.launch { settingsRepository.setStorageAccessEnabled(value) }
+    }
+
     val portForwardRules: StateFlow<List<PortForwardRule>> = portForwardRepository.rules
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
@@ -119,12 +126,15 @@ class SettingsViewModel @Inject constructor(
         viewModelScope.launch { settingsRepository.setTerminalFont(value) }
     }
 
-    // "both" expands into separate TCP + UDP rules
+    // "both" expands into separate TCP + UDP rules. Existing rules with the
+    // same host port + protocol are skipped so the persisted Set doesn't grow.
     fun addPortForward(hostPort: Int, guestPort: Int, protocol: String = "tcp") {
         val protos = if (protocol == "both") listOf("tcp", "udp") else listOf(protocol)
         viewModelScope.launch {
+            val existing = portForwardRules.value.toSet()
             protos.forEach { proto ->
                 val rule = PortForwardRule(hostPort, guestPort, proto)
+                if (existing.any { it.hostPort == hostPort && it.protocol == proto }) return@forEach
                 portForwardRepository.addRule(rule)
                 if (podroidQemu.state.value is VmState.Running) {
                     podroidQemu.qmpClient.addPortForward(hostPort, guestPort, proto)
@@ -133,15 +143,8 @@ class SettingsViewModel @Inject constructor(
         }
     }
 
-    /** Current LAN IP of the Android device — shown next to port forward rules. */
-    val phoneIp: String
-        get() = try {
-            java.net.NetworkInterface.getNetworkInterfaces()
-                ?.asSequence()
-                ?.flatMap { it.inetAddresses.asSequence() }
-                ?.firstOrNull { !it.isLoopbackAddress && it is java.net.Inet4Address }
-                ?.hostAddress ?: "unknown"
-        } catch (_: Exception) { "unknown" }
+    /** Current LAN IP of the Android device — shown next to port forward rules. Cached for the VM lifetime. */
+    val phoneIp: String by lazy { NetworkUtils.localIpv4() }
 
     fun removePortForward(rule: PortForwardRule) {
         viewModelScope.launch {
@@ -276,8 +279,9 @@ class SettingsViewModel @Inject constructor(
             appendLine("=== QEMU Console Log ===")
             val consoleFile = File(context.filesDir, "console.log")
             if (consoleFile.exists() && consoleFile.length() > 0) {
-                append(consoleFile.readText())
-                if (!consoleFile.readText().endsWith("\n")) appendLine()
+                val text = consoleFile.readText()
+                append(text)
+                if (!text.endsWith("\n")) appendLine()
             } else {
                 appendLine("(no console.log — VM has not been started this session)")
             }
