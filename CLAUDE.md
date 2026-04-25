@@ -58,7 +58,7 @@ The terminal layer uses three QEMU Unix sockets, each with a single role:
 
 ### Key Components
 
-**`engine/PodroidQemu.kt`** — the core singleton. Builds and launches the QEMU process, monitors boot output from serial, manages `TerminalSession` lifecycle, and auto-starts `podroid-bridge` after boot. State machine: `Idle → Starting → Running → Stopped` (see `VmState.kt`).
+**`engine/PodroidQemu.kt`** — the core singleton. Builds and launches the QEMU process, monitors boot output from serial, manages `TerminalSession` lifecycle, and auto-starts `podroid-bridge` after boot. State machine: `Idle → Starting → Running → Stopped` (see `VmState.kt`). `detectBootStage()` scans the last 1024 chars of the rolling `consoleBuilder` rather than each `read()` chunk — required because fast devices (Pixel 10 Pro XL) split markers like `Ready!` across reads and the old per-chunk match silently fell through to the 60 s boot-timeout fallback.
 
 **`service/PodroidService.kt`** — foreground service that owns the QEMU process. Holds a `WakeLock`, updates the persistent notification with boot stages, and handles graceful stop when the app is swiped from recents.
 

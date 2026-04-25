@@ -1,6 +1,7 @@
 # Podroid AI Context
 
-> **Last updated:** 2026-04-23
+> **Last updated:** 2026-04-25
+> **Current version:** 1.1.5 (versionCode 17)
 > **Purpose:** Complete project context for AI-assisted development. Read this before touching any file.
 
 ---
@@ -308,8 +309,8 @@ Mouse     → TerminalView touch handler → PTY → bridge → terminal.sock �
 | Method | What it does |
 |--------|-------------|
 | `start(portForwards, ramMb, cpus, sshEnabled, androidIp)` | Launches QEMU process, starts boot monitor coroutine, 60s timeout fallback |
-| `monitorBootSerial(proc)` | Reads serial.sock, writes console.log, calls detectBootStage() |
-| `detectBootStage(text)` | Matches boot stage strings, sets _bootStage and _state |
+| `monitorBootSerial(proc)` | Reads serial.sock, appends to consoleBuilder + console.log, calls detectBootStage() |
+| `detectBootStage()` | Scans the last 1024 chars of `consoleBuilder` (stateful rolling buffer) and matches boot-stage strings; sets _bootStage and _state. The rolling buffer was added in 1.1.5 to survive markers split across `read()` chunks on fast devices (e.g. Pixel 10 Pro XL was missing "Ready!" and falling back to the 60 s timeout). |
 | `releaseSerial()` | shutdownInput + shutdownOutput + close on bootSocket |
 | `autoStartBridge()` | Posts to MainLooper, calls releaseSerial(), 500ms delay, creates TerminalSession |
 | `createTerminalSession(client)` | Returns pre-started session or creates new one; sets sessionClientDelegate |
@@ -591,7 +592,7 @@ adb shell run-as com.excp.podroid.debug cat files/console.log
 
 ---
 
-## Pending Work (as of 2026-04-22)
+## Pending Work (as of 2026-04-25)
 
 ### Next Feature: Container Hub
 Full container management screen — SSH into VM at `127.0.0.1:9922`, run `podman ps`, one-tap deploy from a catalog of services (Pi-hole, Vaultwarden, code-server, Gitea, Jellyfin, Uptime Kuma, Filebrowser, Nginx, Grafana). Requires JSch dependency.
