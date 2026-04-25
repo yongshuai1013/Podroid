@@ -58,6 +58,28 @@ class SettingsViewModel @Inject constructor(
     val terminalFont: StateFlow<String> = settingsRepository.terminalFont
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), "default")
 
+    val qemuExtraArgs: StateFlow<String> = settingsRepository.qemuExtraArgs
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), SettingsRepository.DEFAULT_QEMU_EXTRA_ARGS)
+
+    val kernelExtraCmdline: StateFlow<String> = settingsRepository.kernelExtraCmdline
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), SettingsRepository.DEFAULT_KERNEL_EXTRA_CMDLINE)
+
+    fun setQemuExtraArgs(value: String) {
+        viewModelScope.launch { settingsRepository.setQemuExtraArgs(value) }
+    }
+
+    fun setKernelExtraCmdline(value: String) {
+        viewModelScope.launch { settingsRepository.setKernelExtraCmdline(value) }
+    }
+
+    fun resetQemuExtraArgs() {
+        viewModelScope.launch { settingsRepository.setQemuExtraArgs(SettingsRepository.DEFAULT_QEMU_EXTRA_ARGS) }
+    }
+
+    fun resetKernelExtraCmdline() {
+        viewModelScope.launch { settingsRepository.setKernelExtraCmdline(SettingsRepository.DEFAULT_KERNEL_EXTRA_CMDLINE) }
+    }
+
     val storageSizeGb: StateFlow<Int> = settingsRepository.storageSizeGb
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 2)
 
@@ -188,6 +210,8 @@ class SettingsViewModel @Inject constructor(
         val storageAccess = runCatching { settingsRepository.getStorageAccessEnabledSnapshot() }.getOrDefault(false)
         val theme = runCatching { settingsRepository.getTerminalColorThemeSnapshot() }.getOrDefault("default")
         val font = runCatching { settingsRepository.getTerminalFontSnapshot() }.getOrDefault("default")
+        val qemuExtras = runCatching { settingsRepository.getQemuExtraArgsSnapshot() }.getOrDefault("")
+        val kernelExtras = runCatching { settingsRepository.getKernelExtraCmdlineSnapshot() }.getOrDefault("")
         val rules = runCatching { portForwardRepository.getRulesSnapshot() }.getOrDefault(emptyList())
 
         buildString {
@@ -220,6 +244,8 @@ class SettingsViewModel @Inject constructor(
             appendLine("Downloads sharing:  $storageAccess")
             appendLine("Terminal theme:     $theme")
             appendLine("Terminal font:      $font")
+            appendLine("QEMU extra args:    $qemuExtras")
+            appendLine("Kernel extra cmd:   $kernelExtras")
             appendLine()
 
             appendLine("=== VM State ===")

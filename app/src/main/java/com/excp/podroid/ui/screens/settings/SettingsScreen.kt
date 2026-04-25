@@ -19,8 +19,11 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.ExpandLess
+import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.RestartAlt
 import androidx.compose.material.icons.filled.Share
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -75,6 +78,9 @@ fun SettingsScreen(
     val vmCpus by viewModel.vmCpus.collectAsStateWithLifecycle()
     val storageSizeGb by viewModel.storageSizeGb.collectAsStateWithLifecycle()
     val sshEnabled by viewModel.sshEnabled.collectAsStateWithLifecycle(false)
+    val qemuExtraArgs by viewModel.qemuExtraArgs.collectAsStateWithLifecycle()
+    val kernelExtraCmdline by viewModel.kernelExtraCmdline.collectAsStateWithLifecycle()
+    var advancedExpanded by remember { mutableStateOf(false) }
     var showAddDialog by remember { mutableStateOf(false) }
     var showResetDialog by remember { mutableStateOf(false) }
     val context = LocalContext.current
@@ -319,6 +325,90 @@ fun SettingsScreen(
 
             Spacer(Modifier.height(16.dp))
 
+            // ── Advanced QEMU ─────────────────────────────────────────
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { advancedExpanded = !advancedExpanded }
+                    .padding(vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = "Advanced QEMU",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.weight(1f),
+                )
+                Icon(
+                    imageVector = if (advancedExpanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                    contentDescription = if (advancedExpanded) "Collapse" else "Expand",
+                )
+            }
+
+            if (advancedExpanded) {
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(bottom = 8.dp),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.4f),
+                    ),
+                ) {
+                    Row(
+                        modifier = Modifier.padding(12.dp),
+                        verticalAlignment = Alignment.Top,
+                    ) {
+                        Icon(
+                            Icons.Default.Warning,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.error,
+                            modifier = Modifier.padding(end = 8.dp, top = 2.dp),
+                        )
+                        Text(
+                            text = "Editing these may prevent the VM from booting. " +
+                                "RAM, CPU count, sockets, storage, and networking are " +
+                                "managed by the app and not exposed here. Use Reset if " +
+                                "the VM stops booting.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onErrorContainer,
+                        )
+                    }
+                }
+
+                if (!vmNotRunning) {
+                    Text(
+                        text = "Stop the VM before editing — changes apply on next boot.",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.padding(bottom = 8.dp),
+                    )
+                }
+
+                AdvancedTextSetting(
+                    label = "Extra QEMU args",
+                    helper = "-cpu, -accel, -object, -device, -overcommit, etc. Whitespace-separated.",
+                    value = qemuExtraArgs,
+                    enabled = vmNotRunning,
+                    onValueChange = viewModel::setQemuExtraArgs,
+                    onReset = viewModel::resetQemuExtraArgs,
+                    minLines = 4,
+                )
+
+                Spacer(Modifier.height(12.dp))
+
+                AdvancedTextSetting(
+                    label = "Extra kernel cmdline",
+                    helper = "Appended after console=ttyAMA0 — controls scheduler, mitigations, log level, etc.",
+                    value = kernelExtraCmdline,
+                    enabled = vmNotRunning,
+                    onValueChange = viewModel::setKernelExtraCmdline,
+                    onReset = viewModel::resetKernelExtraCmdline,
+                    minLines = 2,
+                )
+
+                Spacer(Modifier.height(16.dp))
+            }
+
             // ── About ─────────────────────────────────────────────────
             SettingsSectionHeader("About")
 
@@ -538,5 +628,53 @@ private fun SettingsInfoRow(label: String, value: String) {
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
+    }
+}
+
+@Composable
+private fun AdvancedTextSetting(
+    label: String,
+    helper: String,
+    value: String,
+    enabled: Boolean,
+    onValueChange: (String) -> Unit,
+    onReset: () -> Unit,
+    minLines: Int,
+) {
+    var localValue by remember(value) { mutableStateOf(value) }
+
+    Column(modifier = Modifier.fillMaxWidth()) {
+        OutlinedTextField(
+            value = localValue,
+            onValueChange = {
+                localValue = it
+                onValueChange(it)
+            },
+            label = { Text(label) },
+            enabled = enabled,
+            singleLine = false,
+            minLines = minLines,
+            textStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+            modifier = Modifier.fillMaxWidth(),
+        )
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text = helper,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.weight(1f),
+            )
+            TextButton(
+                onClick = onReset,
+                enabled = enabled,
+            ) {
+                Text("Reset")
+            }
+        }
     }
 }

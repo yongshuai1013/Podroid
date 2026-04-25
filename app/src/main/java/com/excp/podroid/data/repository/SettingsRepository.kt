@@ -39,6 +39,19 @@ class SettingsRepository @Inject constructor(
         val KEY_SSH_ENABLED   = booleanPreferencesKey("ssh_enabled")
         val KEY_TERMINAL_COLOR_THEME = stringPreferencesKey("terminal_color_theme")
         val KEY_TERMINAL_FONT        = stringPreferencesKey("terminal_font")
+        val KEY_QEMU_EXTRA_ARGS      = stringPreferencesKey("qemu_extra_args")
+        val KEY_KERNEL_EXTRA_CMDLINE = stringPreferencesKey("kernel_extra_cmdline")
+
+        /** Default tunable QEMU args — CPU model, accel tuning, RNG source, overcommit. */
+        const val DEFAULT_QEMU_EXTRA_ARGS =
+            "-cpu max " +
+            "-accel tcg,thread=multi,tb-size=256 " +
+            "-object rng-random,id=rng0,filename=/dev/urandom " +
+            "-device virtio-rng-pci,rng=rng0 " +
+            "-overcommit mem-lock=off"
+
+        /** Default extra kernel cmdline — log level, TCG-safe mitigations, I/O scheduler. */
+        const val DEFAULT_KERNEL_EXTRA_CMDLINE = "loglevel=1 quiet mitigations=off elevator=mq-deadline"
     }
 
     val darkTheme: Flow<Boolean> = context.dataStore.data
@@ -72,6 +85,12 @@ class SettingsRepository @Inject constructor(
     val terminalFont: Flow<String> = context.dataStore.data
         .map { it[KEY_TERMINAL_FONT] ?: "default" }
 
+    val qemuExtraArgs: Flow<String> = context.dataStore.data
+        .map { it[KEY_QEMU_EXTRA_ARGS] ?: DEFAULT_QEMU_EXTRA_ARGS }
+
+    val kernelExtraCmdline: Flow<String> = context.dataStore.data
+        .map { it[KEY_KERNEL_EXTRA_CMDLINE] ?: DEFAULT_KERNEL_EXTRA_CMDLINE }
+
     suspend fun setDarkTheme(value: Boolean) =
         context.dataStore.edit { it[KEY_DARK_THEME] = value }
 
@@ -103,6 +122,12 @@ class SettingsRepository @Inject constructor(
     suspend fun setTerminalFont(value: String) =
         context.dataStore.edit { it[KEY_TERMINAL_FONT] = value }
 
+    suspend fun setQemuExtraArgs(value: String) =
+        context.dataStore.edit { it[KEY_QEMU_EXTRA_ARGS] = value }
+
+    suspend fun setKernelExtraCmdline(value: String) =
+        context.dataStore.edit { it[KEY_KERNEL_EXTRA_CMDLINE] = value }
+
     suspend fun getSshEnabledSnapshot(): Boolean =
         context.dataStore.data.map { it[KEY_SSH_ENABLED] ?: false }.first()
 
@@ -127,4 +152,10 @@ class SettingsRepository @Inject constructor(
 
     suspend fun getTerminalFontSnapshot(): String =
         context.dataStore.data.map { it[KEY_TERMINAL_FONT] ?: "default" }.first()
+
+    suspend fun getQemuExtraArgsSnapshot(): String =
+        context.dataStore.data.map { it[KEY_QEMU_EXTRA_ARGS] ?: DEFAULT_QEMU_EXTRA_ARGS }.first()
+
+    suspend fun getKernelExtraCmdlineSnapshot(): String =
+        context.dataStore.data.map { it[KEY_KERNEL_EXTRA_CMDLINE] ?: DEFAULT_KERNEL_EXTRA_CMDLINE }.first()
 }

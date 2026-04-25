@@ -458,12 +458,18 @@ class PodroidQemu @Inject constructor(
     ): List<String> {
         val args = mutableListOf<String>()
 
+        // User-tunable extras (CPU model, accel tuning, RNG, overcommit, kernel cmdline extras).
+        // Pulled from SettingsRepository; falls back to the documented defaults.
+        val userQemuExtras = kotlinx.coroutines.runBlocking {
+            settingsRepository.getQemuExtraArgsSnapshot()
+        }.trim()
+        val userKernelExtras = kotlinx.coroutines.runBlocking {
+            settingsRepository.getKernelExtraCmdlineSnapshot()
+        }.trim()
+
         args += "-M"; args += "virt,gic-version=3"
-        args += "-cpu"; args += "max"
         args += "-smp"; args += "$cpus"
         args += "-m";   args += "$ramMb"
-        val tbSize = if (ramMb >= 2048) 512 else 256
-        args += "-accel"; args += "tcg,thread=multi,tb-size=$tbSize"
 
         val kernelPath = File(context.filesDir, "vmlinuz-virt")
         val initrdPath = File(context.filesDir, "initrd.img")
@@ -471,7 +477,8 @@ class PodroidQemu @Inject constructor(
         if (kernelPath.exists()) {
             args += "-kernel"; args += kernelPath.absolutePath
             val cmdline = buildString {
-                append("console=ttyAMA0 loglevel=1 quiet mitigations=off elevator=mq-deadline")
+                append("console=ttyAMA0")
+                if (userKernelExtras.isNotEmpty()) append(" ").append(userKernelExtras)
                 append(" androidip=$androidIp")
                 if (sshEnabled) append(" ssh=1")
             }
@@ -492,9 +499,6 @@ class PodroidQemu @Inject constructor(
             args += "-device"; args += "virtio-blk-pci,drive=drive1,num-queues=$cpus,iothread=iothread0"
             args += "-drive";  args += "file=${storagePath.absolutePath},if=none,id=drive1,format=raw,cache=writeback,aio=threads"
         }
-
-        args += "-object"; args += "rng-random,id=rng0,filename=/dev/urandom"
-        args += "-device"; args += "virtio-rng-pci,rng=rng0"
 
         // Downloads folder sharing via virtio-9p
         val downloadsDir = android.os.Environment.getExternalStoragePublicDirectory(
@@ -536,7 +540,12 @@ class PodroidQemu @Inject constructor(
 
         args += "-display"; args += "none"
         args += "-qmp";     args += "unix:$qmpSocketPath,server,nowait"
-        args += "-overcommit"; args += "mem-lock=off"
+
+        // User extras appended last so they can override earlier args where
+        // QEMU allows it (later -cpu / -accel overrides earlier ones).
+        if (userQemuExtras.isNotEmpty()) {
+            args += userQemuExtras.split(Regex("\\s+"))
+        }
 
         return listOf(qemuExe.absolutePath) + args
     }
