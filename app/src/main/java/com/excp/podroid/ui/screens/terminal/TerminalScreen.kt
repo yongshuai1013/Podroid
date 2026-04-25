@@ -238,25 +238,19 @@ fun TerminalScreen(
                         // existing state draws on first layout.
                         view.onScreenUpdated()
 
-                        // Push cols/rows to the session on a schedule:
-                        //   forceUpdateSizeFromView  — Paint-based fallback, works before mRenderer
-                        //                             is initialized; uses currentTypeface so custom
-                        //                             fonts produce correct metrics.
-                        //   view.updateSize()        — renderer-based, accurate after first draw.
-                        // Both are called; the renderer path is called last so it wins once ready.
-                        // Multiple delays ensure the VM's ctrl.sock resize daemon receives the
-                        // message even if it wasn't listening yet at the initial post.
-                        val pushSize = {
+                        // Push initial cols/rows once the view has laid out.
+                        // forceUpdateSizeFromView is the Paint-based fallback that works
+                        // before mRenderer is initialized; view.updateSize() is the renderer
+                        // path called last so it wins once metrics are ready.
+                        view.post {
                             viewModel.forceUpdateSizeFromView(view)
                             view.updateSize()
                             view.onScreenUpdated()
                         }
-                        view.post(pushSize)
-                        view.postDelayed(pushSize, 150)
-                        view.postDelayed(pushSize, 600)
-                        view.postDelayed(pushSize, 1500)
-                        // Debounce resize: keyboard animation fires one layout change per frame
-                        // (~25 events). Only send RESIZE after the view has been stable for 150ms.
+
+                        // Keyboard animation fires one layout change per frame (~25 events).
+                        // Debounce so SIGWINCH only fires once after the view has been stable
+                        // for 150 ms — turns 25 prompt-redraw flashes into one.
                         val resizeHandler = android.os.Handler(android.os.Looper.getMainLooper())
                         var pendingResize: Runnable? = null
                         val listener = android.view.View.OnLayoutChangeListener { v, left, top, right, bottom,
@@ -284,14 +278,10 @@ fun TerminalScreen(
                         factory = { view },
                         update = { v ->
                             v.setTextSize(fontSize)
-                            // setTextSize immediately recreates mRenderer with new metrics.
-                            // Use v.updateSize() directly — it reads from mRenderer (correct),
-                            // avoiding the off-by-row conflict with forceUpdateSizeFromView's
-                            // different line-height formula. Multiple delays ensure the VM's
-                            // resize daemon receives the message even under load.
+                            // setTextSize recreates mRenderer with new metrics; one updateSize
+                            // post-layout is enough because virtio-console reliably delivers
+                            // RESIZE to the VM (no need for the old multi-shot retries).
                             v.post { v.updateSize() }
-                            v.postDelayed({ v.updateSize() }, 300)
-                            v.postDelayed({ v.updateSize() }, 800)
                         },
                         modifier = Modifier.fillMaxSize(),
                     )

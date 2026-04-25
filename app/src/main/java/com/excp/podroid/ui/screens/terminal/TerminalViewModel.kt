@@ -103,8 +103,6 @@ class TerminalViewModel @Inject constructor(
             v.updateSize()
             v.onScreenUpdated()
         }
-        v.postDelayed({ v.updateSize() }, 300)
-        v.postDelayed({ v.updateSize() }, 800)
     }
 
     fun updateShowExtraKeys(value: Boolean) { showExtraKeys = value }
@@ -170,7 +168,6 @@ class TerminalViewModel @Inject constructor(
         terminalView?.setTypeface(typeface)
         terminalView?.let { v ->
             v.post { forceUpdateSizeFromView(v); v.updateSize() }
-            v.postDelayed({ v.updateSize() }, 400)
         }
     }
 
