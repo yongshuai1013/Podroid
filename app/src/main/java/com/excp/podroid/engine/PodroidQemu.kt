@@ -2,19 +2,25 @@
  * Podroid - Rootless Podman for Android
  * Copyright (C) 2024 Podroid contributors
  *
- * QEMU engine for Podroid. Manages the VM lifecycle and exposes two Unix
+ * QEMU engine for Podroid. Manages the VM lifecycle and exposes three Unix
  * sockets for the terminal layer:
  *
- *   serial.sock — QEMU serial chardev (ttyAMA0 in the VM). The podroid-bridge
- *                 binary connects here for bidirectional terminal I/O.
+ *   serial.sock   — QEMU -serial (ttyAMA0 in the VM). Boot-log sink only:
+ *                   PodroidQemu's monitorBootSerial coroutine connects here
+ *                   for the lifetime of the VM, streaming kernel messages
+ *                   and init-podroid boot stages into console.log + the
+ *                   in-memory ring buffer used by detectBootStage().
  *
- *   ctrl.sock   — QEMU virtio-console chardev (hvc0 in the VM). The bridge
- *                 writes "RESIZE rows cols\n" here on SIGWINCH; the VM daemon
- *                 calls stty on ttyAMA0 which triggers SIGWINCH in the VM.
+ *   terminal.sock — QEMU virtio-console (/dev/hvc0 in the VM). Primary
+ *                   terminal I/O. getty runs on hvc0; the podroid-bridge
+ *                   binary connects here for bidirectional shell I/O. Fully
+ *                   independent of serial.sock, so no socket hand-off.
  *
- * Boot monitoring: PodroidQemu connects to serial.sock and reads until the VM
- * reaches the "Ready" stage (or until releaseSerial() is called). The bridge
- * then takes over the connection for interactive terminal use.
+ *   ctrl.sock     — QEMU virtio-console (/dev/hvc1 in the VM). Resize signal
+ *                   channel only. Bridge writes "RESIZE rows cols\n" on
+ *                   SIGWINCH (debounced by RESIZE_DEBOUNCE_MS); the resize
+ *                   daemon in init-podroid stty's hvc0 to deliver SIGWINCH
+ *                   to the foreground TUI inside the VM.
  */
 package com.excp.podroid.engine
 
@@ -108,11 +114,13 @@ class PodroidQemu @Inject constructor(
     }
 
     /**
-     * Release the boot-monitoring serial connection so podroid-bridge can connect.
+     * Close the boot-monitoring serial socket. Called from cleanup() when the
+     * VM stops; not used as a hand-off trigger any more (bridge has its own
+     * socket).
      */
     fun releaseSerial() {
         val sock = bootSocket ?: return
-        Log.d(TAG, "Releasing boot monitor socket")
+        Log.d(TAG, "Closing boot monitor socket")
         bootSocket = null
         try {
             // Signal EOF to the monitor loop
@@ -121,27 +129,6 @@ class PodroidQemu @Inject constructor(
             sock.close()
         } catch (e: Exception) {
             Log.w(TAG, "Error closing boot socket: ${e.message}")
-        }
-    }
-
-    /**
-     * Replay the portion of boot serial output that arrived after "Ready!" into
-     * a freshly created terminal emulator.
-     */
-    private fun replayBootOutput(sess: TerminalSession) {
-        val console = _consoleText.value
-        val readyIdx = console.indexOf("Ready!")
-        if (readyIdx < 0) return
-        val lineEnd = console.indexOf('\n', readyIdx)
-        if (lineEnd < 0) return
-        val postReady = console.substring(lineEnd + 1)
-        if (postReady.isEmpty()) return
-        val bytes = postReady.toByteArray(Charsets.UTF_8)
-        try {
-            sess.emulator?.append(bytes, bytes.size)
-            Log.d(TAG, "Replayed ${bytes.size}B of post-Ready output to emulator")
-        } catch (e: Exception) {
-            Log.w(TAG, "Could not replay boot output: ${e.message}")
         }
     }
 
@@ -196,7 +183,6 @@ class PodroidQemu @Inject constructor(
         )
 
         sess.updateSize(80, 24)
-        replayBootOutput(sess)
 
         _terminalSession = sess
         _terminalSessionAttached = true
@@ -322,9 +308,12 @@ class PodroidQemu @Inject constructor(
     }
 
     /**
-     * Connects to serial.sock and reads boot output until:
-     *   - The "Ready" stage is detected, or
-     *   - releaseSerial() is called (bootSocket closed externally), or
+     * Connects to serial.sock and streams kernel + init-podroid output for the
+     * lifetime of the VM. Writes the bytes to console.log and pushes the
+     * latest tail into the consoleText flow used by the diagnostic exporter
+     * and the boot-stage detector. Stops when:
+     *   - releaseSerial() is called during cleanup() (VM stopping), or
+     *   - QEMU itself exits, or
      *   - The coroutine is cancelled.
      *
      * Writes all output to console.log for the test-deploy.sh validator and

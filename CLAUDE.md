@@ -44,12 +44,17 @@ The app uses debug build for all releases (release signing not configured). Nati
 ```
 Terminal UI (Compose)
     ↕ TerminalSession (Termux JNI)
-libpodroid-bridge.so  ←→  serial.sock / ctrl.sock  ←→  QEMU  ←→  ttyAMA0 (Alpine)
+libpodroid-bridge.so  ←→  terminal.sock + ctrl.sock  ←→  QEMU  ←→  hvc0 + hvc1 (Alpine)
+
+PodroidQemu (boot monitor) ←→ serial.sock ←→ QEMU ←→ ttyAMA0 (boot log only)
 ```
 
-- **Terminal I/O:** TerminalSession runs `libpodroid-bridge.so` as a process; the bridge connects `serial.sock` (I/O relay) and `ctrl.sock` (SIGWINCH / resize signaling)
-- **Port forwarding:** `QmpClient` sends `netdev_add`/`netdev_remove` commands to `qmp.sock` at runtime
-- **Boot monitoring:** `PodroidQemu` reads `serial.sock` until it detects the "Ready!" marker, logging all output to `console.log`
+The terminal layer uses three QEMU Unix sockets, each with a single role:
+
+- **`terminal.sock`** ↔ virtio-console `/dev/hvc0` — primary terminal I/O. getty runs on hvc0; `libpodroid-bridge.so` relays it to a Termux PTY.
+- **`ctrl.sock`** ↔ virtio-console `/dev/hvc1` — resize signal channel. Bridge debounces SIGWINCH bursts (~25 per keyboard slide) and writes a single `RESIZE rows cols\n`; the resize daemon in `init-podroid` stty's hvc0.
+- **`serial.sock`** ↔ PL011 `/dev/ttyAMA0` — boot log sink. `PodroidQemu.monitorBootSerial` connects for the lifetime of the VM, streaming kernel + init output into `console.log` and the boot-stage detector. No bridge handoff.
+- **`qmp.sock`** — runtime control for port forwarding (`QmpClient` sends `netdev_add` / `netdev_remove`).
 
 ### Key Components
 
@@ -57,7 +62,7 @@ libpodroid-bridge.so  ←→  serial.sock / ctrl.sock  ←→  QEMU  ←→  tty
 
 **`service/PodroidService.kt`** — foreground service that owns the QEMU process. Holds a `WakeLock`, updates the persistent notification with boot stages, and handles graceful stop when the app is swiped from recents.
 
-**`podroid-bridge.c`** — native C binary (compiled to `libpodroid-bridge.so`) that Termux runs as a subprocess. Bidirectionally relays PTY ↔ `serial.sock`, answers ESC window-size queries locally, and sends `RESIZE rows cols\n` to `ctrl.sock` on SIGWINCH.
+**`podroid-bridge.c`** — native C binary (compiled to `libpodroid-bridge.so`) that Termux runs as a subprocess. Bidirectionally relays PTY ↔ `terminal.sock`, and writes `RESIZE rows cols\n` to `ctrl.sock` after a 200 ms-debounced SIGWINCH burst (so a single keyboard-slide animation produces one shell prompt redraw, not 25).
 
 **`init-podroid`** — two-phase Alpine init script embedded as an asset. Phase 1 mounts overlayfs over `storage.img`; Phase 2 sets up cgroup v2, SLIRP networking, Podman, and Dropbear SSH, then prints the boot stage markers consumed by `PodroidQemu`.
 
@@ -76,7 +81,7 @@ Single-activity Compose app: `NavGraph.kt` routes `setup → home → terminal /
 | File | What it is |
 |---|---|
 | `libqemu-system-aarch64.so` | QEMU TCG emulator (PIE executable, 16KB aligned) |
-| `libpodroid-bridge.so` | PTY ↔ serial relay (PIE executable, 16KB aligned) |
+| `libpodroid-bridge.so` | PTY ↔ virtio-console relay (PIE executable, 16KB aligned) |
 | `libtermux.so` | Termux terminal emulator JNI (rebuilt for 16KB pages) |
 | `libslirp.so` | SLIRP user-mode networking (statically linked into QEMU) |
 
@@ -85,8 +90,9 @@ These are executed directly via `ProcessBuilder` / `TerminalSession`, not loaded
 ## QEMU Command Construction
 
 `PodroidQemu.buildCommand()` constructs the full QEMU cmdline including:
-- `-serial unix:serial.sock` / `-chardev socket,path=ctrl.sock` / `-qmp unix:qmp.sock`
-- RAM and CPU count from `SettingsRepository`
+- `-serial unix:serial.sock` (boot log) + a virtio-serial-pci bus carrying two virtconsoles: `terminal.sock` (org.podroid.term, hvc0) and `ctrl.sock` (org.podroid.ctrl, hvc1)
+- `-qmp unix:qmp.sock` for runtime port-forward changes
+- RAM, CPU count, and user-editable extras (`-cpu`, `-accel`, RNG, etc.) from `SettingsRepository`
 - Virtio block device backed by `storage.img` (resized on first boot to configured size)
 - SLIRP networking with runtime port forwards via `QmpClient` (`netdev_add`/`netdev_remove` over `qmp.sock`)
 
@@ -106,6 +112,17 @@ All tuning applies under software emulation only — KVM is impossible without r
 - ZRAM swap at half physical RAM using lz4 — gives 1.5–2× effective memory with near-zero I/O cost; swapon at priority 100 so it's preferred over any file swap
 
 **In `Dockerfile` (QEMU build):**
-- `-O3 -flto=thin` in `--extra-cflags` / `--extra-ldflags` — LLVM thin LTO optimises across QEMU's translation units including the TCG hot path; deps are built separately without LTO so mixed linking is intentional
+- QEMU 11.0.0-rc2 cross-compiled against NDK r27c with three minimum patches:
+  `--disable-plugins` (uftrace.c uses `timespec_get`, absent from Bionic),
+  empty `contrib/ivshmem-{server,client}/meson.build` (use shm_open we don't ship),
+  `-include shm_shim.h` declarations + a `libshm.a` stub implementing
+  `shm_open`/`shm_unlink` via `memfd_create` (NDK API-28 stubs lack them).
+- Custom Linux 6.6.87 kernel: arm64 defconfig + `podroid_kernel.config` (modules)
+  + `forced_builtin.config` (=y for IPV6 / BRIDGE / NF_TABLES / NFT_COMPAT /
+   MASQUERADE family / VETH / TUN / OVERLAY_FS / FUSE_FS).
+- A build-time loop greps the resolved `.config` and **fails the build** if
+  any of those critical options isn't `=y`. This guards against silent
+  Kconfig demotions caused by unmet tristate deps (e.g. CONFIG_BRIDGE caps
+  out at IPV6's strength).
 
 **What won't work without root:** `io_uring` (Android 12+ seccomp block), CPU affinity/taskset, KSM memory dedup, TAP networking, huge pages on the host.

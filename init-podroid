@@ -62,17 +62,15 @@ hostname podroid 2>/dev/null
 printf '127.0.0.1\tlocalhost podroid\n::1\tlocalhost ip6-localhost\n' > /etc/hosts
 
 # ── Kernel modules + device nodes ────────────────────────────────────────────
+# Bridge / netfilter / overlay / fuse / virtio are =y in our custom kernel
+# (see Dockerfile forced_builtin.config), so only the few that legitimately
+# remain modular are loaded here. The check on /lib/modules still guards
+# against a kernel built without CONFIG_MODULES.
 boot_stage "Loading kernel modules..."
 _kver=$(uname -r)
 if [ -d "/lib/modules/$_kver" ]; then
     depmod -a 2>/dev/null
-    for _mod in \
-        virtio_net virtio_blk fuse tun veth \
-        bridge br_netfilter overlay \
-        xt_addrtype xt_conntrack xt_nat xt_mark xt_comment \
-        nf_nat nf_conntrack nf_conntrack_netlink nfnetlink \
-        ip_tables ip6_tables ip6table_nat \
-        9p 9pnet 9pnet_virtio; do
+    for _mod in 9p 9pnet 9pnet_virtio; do
         modprobe "$_mod" 2>/dev/null
     done
 fi
@@ -188,7 +186,6 @@ export CONTAINERS_STORAGE_CONF=/etc/containers/storage.conf
 export CONTAINERS_REGISTRIES_CONF=/etc/containers/registries.conf
 
 dmesg -n 1 2>/dev/null
-stty rows 24 cols 80 -ixon -ixoff -iexten 2>/dev/null
 trap 'podman stop -a -t 5 2>/dev/null; podman network prune -f 2>/dev/null; sync' TERM INT HUP
 
 # ── Resize daemon (reads RESIZE msgs from hvc1, applies to hvc0 terminal) ─────

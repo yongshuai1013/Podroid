@@ -18,7 +18,9 @@
  *   SIGPIPE  — ignored; EPIPE on write = EOF, handled in main loop
  *   SIGINT   — graceful shutdown
  *   SIGTERM  — graceful shutdown
- *   SIGWINCH — async flag, processed in select() loop; fires send_resize() immediately
+ *   SIGWINCH — async flag, debounced in the select() loop. Each signal just
+ *              refreshes a timestamp; send_resize() fires once after the
+ *              burst has been quiet for RESIZE_DEBOUNCE_MS.
  *
  * Args: <terminal.sock> <ctrl.sock>
  */

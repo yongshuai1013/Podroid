@@ -43,26 +43,25 @@ Android App
 ├── PodroidService (foreground) — hosts QEMU, holds WakeLock, updates notification with boot stages
 ├── PodroidQemu (singleton)
 │   ├── QEMU process (libqemu-system-aarch64.so — ELF binary renamed .so for APK)
-│   ├── serial.sock — boot monitor reads until "Ready!", then bridge connects
-│   ├── ctrl.sock — virtio-console for RESIZE signals from bridge
-│   └── qmp.sock — QEMU Machine Protocol for runtime control (port forwarding)
+│   ├── serial.sock     — ttyAMA0 boot-log sink; monitor stays connected for VM lifetime
+│   ├── terminal.sock   — virtio-console hvc0; primary shell I/O for podroid-bridge
+│   ├── ctrl.sock       — virtio-console hvc1; debounced RESIZE messages from bridge
+│   └── qmp.sock        — QEMU Machine Protocol for runtime control (port forwarding)
 └── Compose UI
     └── Screens: Setup → Home → Terminal / Settings
 ```
 
-### VM Boot Sequence (critical — read carefully)
-1. QEMU starts, creates `serial.sock` (unix socket, server, single-client)
-2. **Boot monitor** (`PodroidQemu.monitorBootSerial`) connects first to `serial.sock`, streams output to `console.log` and parses `boot_stage` strings for the Android UI
-3. `init-podroid` Phase 1 (running in initramfs): mounts virtio-blk as ext4, creates overlayfs (`lowerdir=/`, `upperdir=/mnt/persist/upper`), `chroot /mnt/overlay /init --main`
-4. `init-podroid` Phase 2 (`--main`): kernel modules → networking → containers → SSH → getty on ttyAMA0
-5. Phase 2 emits `boot_stage "Ready!"` then **sleeps 2 seconds** (critical — lets boot monitor finish reading "Ready!" before bridge steals the single-client socket)
-6. `detectBootStage("Ready!")` fires → `_state = Running` → `autoStartBridge()`
-7. **`releaseSerial()`** closes boot monitor socket (`shutdownInput + shutdownOutput + close`)
-8. **500ms delay** then `TerminalSession` launched with `libpodroid-bridge.so` as subprocess
-9. Bridge binary connects to `serial.sock`, relays PTY ↔ serial bidirectionally
+### VM Boot Sequence
+1. QEMU starts and binds all four sockets (`server,nowait` so it doesn't block on a connection).
+2. **Boot monitor** (`PodroidQemu.monitorBootSerial`) connects to `serial.sock` and streams everything kernel and init-podroid write to ttyAMA0 into `console.log` + the in-memory tail used by `detectBootStage`. Stays connected for the lifetime of the VM (no hand-off).
+3. `init-podroid` Phase 1 (initramfs): mounts virtio-blk as ext4, creates overlayfs (`lowerdir=/`, `upperdir=/mnt/persist/upper`), pivots via `/bin/busybox chroot /mnt/overlay /init --main`.
+4. `init-podroid` Phase 2 (`--main`): kernel modules (just `9p*` now — bridge / netfilter / overlay / fuse / virtio are all built-in) → networking → containers → SSH → starts getty on `/dev/hvc0`. Resize daemon listens on `/dev/hvc1`.
+5. Phase 2 emits `boot_stage "Ready!"` immediately before launching the getty loop — no `sleep 2` is needed any more because the bridge connects to a different socket.
+6. `detectBootStage("Ready!")` fires → `_state = Running` → `autoStartBridge()` posts to the main thread.
+7. `TerminalSession` launches `libpodroid-bridge.so` with `terminal.sock` + `ctrl.sock` as args. Bridge connects directly; no socket hand-off, no 500 ms guard delay.
 
-### Single-Client Socket Constraint
-`serial.sock` is QEMU `server,nowait` — only ONE client at a time. Boot monitor connects first. `releaseSerial()` frees it. Bridge has a 50×200ms retry loop. The `sleep 2` in init-podroid and the 500ms `postDelayed` in `autoStartBridge()` are both critical timing guards.
+### No socket hand-off
+The old PL011 path used a single-client `serial.sock` shared by the boot monitor and the bridge, which forced a `releaseSerial()` + delay dance. With the virtio-console split that constraint is gone. `releaseSerial()` only runs during `cleanup()` on VM stop now.
 
 ---
 
@@ -81,7 +80,7 @@ All tuning applies under software emulation only — KVM is impossible without r
 - ZRAM swap at half physical RAM using lz4 — gives 1.5–2× effective memory with near-zero I/O cost; swapon at priority 100 so it's preferred over any file swap.
 
 **In `Dockerfile` (QEMU build):**
-- `-O3 -flto=thin` in `--extra-cflags` / `--extra-ldflags` — LLVM thin LTO optimises across QEMU's translation units including the TCG hot path.
+- Currently `-fPIC -DANDROID` only (no LTO / -O3) — those previously caused link failures with QEMU 11.0.0-rc2 + NDK r27c. Three minimum patches make the build clean: `--disable-plugins`, empty `contrib/ivshmem-{server,client}/meson.build` stubs, and an `-include shm_shim.h` + `libshm.a` (memfd_create-backed) to satisfy `shm_open`/`shm_unlink`.
 
 ---
 
@@ -92,7 +91,7 @@ All tuning applies under software emulation only — KVM is impossible without r
 /
 ├── app/                            # Android application module
 ├── init-podroid                    # VM init script (baked into initrd.img as /init)
-├── podroid-bridge.c                # Native PTY↔serial relay (compiled to libpodroid-bridge.so)
+├── podroid-bridge.c                # Native PTY↔virtio-console relay (compiled to libpodroid-bridge.so)
 ├── Dockerfile                      # Unified multi-stage: downloader → rootfs-builder → packer → qemu-builder → final
 ├── build-all.sh                    # Unified build+deploy script
 ├── gradle.properties               # podroidQemuVersion=11.0.0-rc2
@@ -180,7 +179,7 @@ All tuning applies under software emulation only — KVM is impossible without r
 | File | What it is |
 |---|---|
 | `libqemu-system-aarch64.so` | QEMU TCG emulator (PIE executable, 16KB aligned) |
-| `libpodroid-bridge.so` | PTY ↔ serial relay (PIE executable, 16KB aligned) |
+| `libpodroid-bridge.so` | PTY ↔ virtio-console relay (PIE executable, 16KB aligned) |
 | `libtermux.so` | Termux terminal emulator JNI (rebuilt for 16KB pages) |
 | `libslirp.so` | SLIRP user-mode networking (statically linked into QEMU) |
 
@@ -195,8 +194,9 @@ All tuning applies under software emulation only — KVM is impossible without r
 | Kernel | `filesDir/vmlinuz-virt` |
 | Initrd | `filesDir/initrd.img` |
 | Storage image | `filesDir/storage.img` (ext4, sparse) |
-| serial.sock | `filesDir/serial.sock` — ttyAMA0, single-client, boot monitor then bridge |
-| ctrl.sock | `filesDir/ctrl.sock` — hvc0, bridge writes `RESIZE rows cols\n` |
+| serial.sock | `filesDir/serial.sock` — ttyAMA0, boot-log only; monitor stays connected for VM lifetime |
+| terminal.sock | `filesDir/terminal.sock` — virtio-console hvc0; primary terminal for podroid-bridge |
+| ctrl.sock | `filesDir/ctrl.sock` — virtio-console hvc1; bridge writes debounced `RESIZE rows cols\n` |
 | qmp.sock | `filesDir/qmp.sock` |
 | VM IP | 10.0.2.15/24 (SLIRP) |
 | Gateway | 10.0.2.2 |
@@ -206,8 +206,8 @@ All tuning applies under software emulation only — KVM is impossible without r
 | Default CPUs | 1 (range: 1, 2, 4, 6, 8) |
 | Default font size | 20sp |
 | Default storage | 2 GB (range: 2–64 GB) |
-| QEMU machine | `-M virt,gic-version=3 -cpu max -accel tcg,thread=multi,tb-size=256` |
-| Kernel cmdline | `console=ttyAMA0 loglevel=1 quiet androidip=<ip> [ssh=1]` |
+| QEMU machine | `-M virt,gic-version=3 -smp <cpus> -m <ramMb>`; tunable extras (`-cpu`, `-accel`, RNG, etc.) come from the user-editable Settings field |
+| Kernel cmdline | `console=ttyAMA0 <user-extras> androidip=<ip> [ssh=1]` (default user-extras: `loglevel=1 quiet mitigations=off elevator=mq-deadline`) |
 
 ---
 
@@ -228,7 +228,7 @@ These exact strings are emitted by `init-podroid` and matched by `PodroidQemu.de
 
 Also detected: `Mounting storage...`, `Booting kernel...` (emitted by PodroidQemu itself, not init-podroid).
 
-**Critical**: After `boot_stage "Ready!"`, init-podroid does `sleep 2` before starting the getty loop. This is intentional — gives the boot monitor time to read "Ready!" before the single-client serial.sock becomes available to the bridge.
+No `sleep 2` after `Ready!` is needed any more — the boot monitor stays on `serial.sock` while the bridge connects to a separate `terminal.sock`, so there's no socket hand-off race to guard.
 
 ---
 
@@ -238,41 +238,38 @@ Also detected: `Mounting storage...`, `Booting kernel...` (emitted by PodroidQem
 ```bash
 # Located AFTER the `if [ "$1" = "--main" ]; then ... fi` block (at end of file)
 mount proc/sys/dev
-depmod -a && modprobe virtio_blk  # must load virtio_blk to get /dev/vda
+# virtio_blk is built-in to the custom kernel (no need to modprobe).
 find /dev/vda or /dev/vdb → PERSIST_DEV
 mount -t ext4 PERSIST_DEV /mnt/persist  # mkfs.ext4 if needed
 mkdir -p /mnt/persist/upper /mnt/persist/work /mnt/overlay
 mount -t overlay overlay -o lowerdir=/,upperdir=...,workdir=... /mnt/overlay
-exec chroot /mnt/overlay /init --main
+exec /bin/busybox chroot /mnt/overlay /init --main
 # FALLBACK (if overlay failed): exec /init --main  ← runs without persistence
 ```
 
-**Critical bug to avoid**: The fallback at end of Phase 1 must NOT be `exec chroot /mnt/overlay /init --main` — if overlay failed, `/mnt/overlay` may not exist → kernel panic. Must be `exec /init --main`.
-
-**Critical bug to avoid**: vmlinuz-virt and modules in initrd.img MUST come from the SAME rootfs-builder Docker stage. The Dockerfile copies vmlinuz from `rootfs-builder /boot/vmlinuz-virt` (NOT from the netboot downloader stage). Mismatched kernel/modules = `modprobe virtio_blk` silently skipped = no block device = no storage mount = kernel panic.
+**Critical bug to avoid**: the chroot must use `/bin/busybox chroot` explicitly. Phase 1 runs before busybox applet symlinks are installed, so a bare `chroot` is not in PATH and the script exits with code 127, which the kernel interprets as init dying → panic on every boot.
 
 ### Phase 2 (`--main` flag, runs inside chroot overlay)
 ```bash
 boot_stage "Initializing system..."
 # mount proc/sys/devtmpfs/devpts/tmpfs/cgroup2
 boot_stage "Loading kernel modules..."
-# depmod + modprobe (virtio_net, virtio_blk, fuse, tun, veth, bridge, overlay, ...)
+# Most networking/fs is =y in our custom kernel; only 9p* are still =m.
 boot_stage "Waiting for network..."
-# wait for eth0 with IP (loop), set up resolv.conf (8.8.8.8, 1.1.1.1)
-boot_stage "Network found"  or  boot_stage "Network found"  (after timeout)
+# wait for eth0 with IP (loop), set up resolv.conf (10.0.2.3, 8.8.8.8, 1.1.1.1)
+boot_stage "Network found"
 boot_stage "Configuring containers..."
 # sysctl, /etc/subuid, containers.conf, storage.conf, registries.conf
 boot_stage "Starting SSH..."  # only if ssh=1 in kernel cmdline
 # dropbearkey + dropbear
 boot_stage "Almost ready..."
-# MOTD generation with internet check, bash profile + aliases
-# resize daemon: background loop reads RESIZE from /dev/hvc0, calls stty on /dev/ttyAMA0
+# MOTD generation with async internet check, bash profile + aliases
+# resize daemon (background): reads RESIZE from /dev/hvc1, runs stty on /dev/hvc0
 # write podroid-login wrapper: #!/bin/bash; cat /etc/motd; exec script -q -c 'exec /bin/bash --login' /dev/null
 boot_stage "Ready!"
 rm -f /run/boot_stage
-sleep 2   # ← CRITICAL: let boot monitor read "Ready!" before bridge steals socket
 while true; do
-    /sbin/getty -n -l /usr/local/bin/podroid-login 0 ttyAMA0 xterm-256color
+    /sbin/getty -n -l /usr/local/bin/podroid-login 0 hvc0 xterm-256color
     sleep 1
 done
 ```
@@ -295,15 +292,15 @@ Keyboard  → TerminalView → TerminalSession.write() → PTY master fd
                                                            ↓
                                             podroid-bridge stdin (PTY slave)
                                                            ↓
-                                              serial.sock → ttyAMA0 in VM
-VM output → ttyAMA0 → serial.sock → bridge stdout → PTY slave → TerminalEmulator → TerminalView
+                                          terminal.sock → /dev/hvc0 in VM
+VM output → /dev/hvc0 → terminal.sock → bridge stdout → PTY slave → TerminalEmulator → TerminalView
 Resize    → TerminalView.updateSize() → TIOCSWINSZ on PTY → SIGWINCH → bridge
-                                           → bridge reads TIOCGWINSZ
+                                           → bridge debounces 200 ms → TIOCGWINSZ
                                            → writes "RESIZE rows cols\n" to ctrl.sock
-                                           → VM daemon reads /dev/hvc0
-                                           → stty rows N cols M < /dev/ttyAMA0
+                                           → init resize daemon reads /dev/hvc1
+                                           → stty rows N cols M < /dev/hvc0
                                            → Linux SIGWINCH to VM fg process group
-Mouse     → TerminalView touch handler → PTY → bridge → serial → VM
+Mouse     → TerminalView touch handler → PTY → bridge → terminal.sock → VM
 ```
 
 ### PodroidQemu Key Methods
@@ -356,15 +353,16 @@ arrow(final): if mod==1 → "\x1b[$final"  else → "\x1b[1;$mod$final"
 
 ## podroid-bridge.c
 
-- **Purpose**: Relay PTY (Termux-allocated) ↔ `serial.sock` (QEMU serial)
-- **Arguments**: `bridge_exe serial_sock_path ctrl_sock_path`
+- **Purpose**: Relay PTY (Termux-allocated) ↔ `terminal.sock` (QEMU virtio-console / hvc0).
+- **Arguments**: `bridge_exe terminal_sock_path ctrl_sock_path`.
 - **STDERR silenced** immediately via `dup2(/dev/null, STDERR_FILENO)` — bridge runs as TerminalSession subprocess so stderr IS the PTY.
 - **`cfmakeraw()`** on own stdin (VM's getty handles echo/line editing).
-- **serial.sock retry**: 50 attempts × 200ms = 10s max.
-- **ctrl.sock retry**: 50 × 100ms = 5s max; lazy reconnect on each SIGWINCH if not yet connected.
-- **`filter_queries()`**: Intercepts `ESC[18t` / `ESC[19t` (xterm window size queries from busybox `less`), responds locally with fake size (using `TIOCGWINSZ`), strips bytes — prevents garbage in terminal output.
-- **`send_resize()`**: On SIGWINCH, reads new size via `TIOCGWINSZ`, writes `RESIZE rows cols\n` to ctrl.sock.
-- **select timeout**: 50ms (allows SIGWINCH handling without blocking).
+- **terminal.sock retry**: 50 attempts × 200 ms = 10 s max.
+- **ctrl.sock retry**: 50 × 100 ms = 5 s max; lazy reconnect on each SIGWINCH if not yet connected.
+- **`send_resize()`**: reads new size via `TIOCGWINSZ`, writes `RESIZE rows cols\n` to ctrl.sock.
+- **SIGWINCH debounce**: every signal just refreshes a `clock_gettime(CLOCK_MONOTONIC)` timestamp; the actual `send_resize()` only fires once the burst has been quiet for `RESIZE_DEBOUNCE_MS` (200 ms). Collapses the ~25 per-frame layout changes during an Android keyboard slide into a single shell prompt redraw.
+- **select timeout**: 50 ms — wakes the loop frequently enough to fire the debounced resize on schedule.
+- The old `filter_queries()` intercept (`ESC[18t`/`ESC[19t` xterm size queries) is gone — virtio-console reports real `TIOCGWINSZ` inside the guest, so apps don't need the workaround.
 
 ---
 

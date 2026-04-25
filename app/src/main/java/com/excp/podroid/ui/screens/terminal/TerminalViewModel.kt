@@ -6,15 +6,18 @@
  *
  * The bridge binary (libpodroid-bridge.so) runs as the TerminalSession
  * subprocess. Termux allocates a real PTY for it; the bridge relays that
- * PTY to QEMU's serial Unix socket. Window resize is handled properly:
+ * PTY to QEMU's virtio-console terminal.sock (= /dev/hvc0 in the VM).
+ * Window resize is handled out-of-band over a second virtio-console port:
  *
  *   TerminalSession.updateSize(cols, rows)
  *     → ioctl(pty_master, TIOCSWINSZ)          [Termux JNI]
  *     → SIGWINCH → bridge process
- *     → bridge reads new size via TIOCGWINSZ
- *     → writes "RESIZE rows cols\n" to ctrl.sock
- *     → VM daemon calls stty on /dev/ttyAMA0
- *     → Linux kernel sends SIGWINCH to VM foreground process group
+ *     → bridge debounces (RESIZE_DEBOUNCE_MS, currently 200 ms) so a
+ *       keyboard-slide animation collapses to one event
+ *     → reads final size via TIOCGWINSZ
+ *     → writes "RESIZE rows cols\n" to ctrl.sock (= /dev/hvc1 in the VM)
+ *     → init-podroid resize daemon calls stty on /dev/hvc0
+ *     → Linux sends SIGWINCH to the VM's foreground process group
  *     → nvim / htop / btop redraws correctly
  *
  * No reflection, no emulator injection, no sz stdin injection.
