@@ -28,8 +28,10 @@ import com.excp.podroid.data.repository.PortForwardRepository
 import com.excp.podroid.data.repository.SettingsRepository
 import com.excp.podroid.engine.PodroidQemu
 import com.excp.podroid.engine.VmState
+import com.excp.podroid.util.NetworkUtils
 import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.*
+import kotlinx.coroutines.flow.combine
 import javax.inject.Inject
 
 @AndroidEntryPoint
@@ -121,55 +123,42 @@ class PodroidService : Service() {
     private fun startNotificationUpdates() {
         notificationJob?.cancel()
         notificationJob = serviceScope.launch {
-            launch {
-                podroidQemu.state.collect { state ->
-                    when (state) {
-                        is VmState.Running -> updateNotification("VM is running")
-                        is VmState.Starting -> {
-                            val stage = podroidQemu.bootStage.value
-                            updateNotification(stage.ifEmpty { "Starting VM..." })
-                        }
-                        is VmState.Stopped, is VmState.Idle, is VmState.Error -> return@collect
-                        else -> {}
-                    }
+            launch { observeStateForNotification() }
+            launch { observeStateForShutdown() }
+        }
+    }
+
+    /** Updates the notification text from a combined view of state + bootStage. */
+    private suspend fun observeStateForNotification() {
+        combine(podroidQemu.state, podroidQemu.bootStage) { state, stage -> state to stage }
+            .collect { (state, stage) ->
+                when (state) {
+                    is VmState.Running  -> updateNotification("VM is running")
+                    is VmState.Starting -> updateNotification(stage.ifEmpty { "Starting VM..." })
+                    else -> {} // Terminal states handled by the shutdown observer
                 }
             }
-            launch {
-                podroidQemu.bootStage.collect { stage ->
-                    if (podroidQemu.state.value is VmState.Starting && stage.isNotEmpty()) {
-                        updateNotification(stage)
+    }
+
+    /**
+     * Releases the wakelock and stops the service when the VM reaches a
+     * terminal state. The seenActive guard avoids tearing down on the initial
+     * Idle replay before QEMU has even been launched.
+     */
+    private suspend fun observeStateForShutdown() {
+        var seenActive = false
+        podroidQemu.state.collect { state ->
+            when (state) {
+                is VmState.Starting, is VmState.Running -> seenActive = true
+                is VmState.Stopped, is VmState.Idle, is VmState.Error -> {
+                    if (!seenActive) return@collect
+                    releaseWakeLock()
+                    if (Build.VERSION.SDK_INT >= 33) {
+                        stopForeground(STOP_FOREGROUND_REMOVE)
+                    } else {
+                        @Suppress("DEPRECATION") stopForeground(true)
                     }
-                }
-            }
-            launch {
-                // Terminal states: release resources and shut down the service.
-                // Error must be included here — otherwise a failed boot leaves the
-                // wakelock held and the foreground notification stuck on "Starting...".
-                //
-                // StateFlow replays its current value on subscription, so this
-                // collector fires immediately with whatever state is already set.
-                // At service-start time the current state is Idle (QEMU hasn't
-                // been launched yet), which used to match this branch and
-                // instantly release the wakelock we just acquired. Guard with
-                // a "seenActive" flag so cleanup only runs on a real
-                // active → terminal transition.
-                var seenActive = false
-                podroidQemu.state.collect { state ->
-                    when (state) {
-                        is VmState.Starting, is VmState.Running -> seenActive = true
-                        is VmState.Stopped, is VmState.Idle, is VmState.Error -> {
-                            if (seenActive) {
-                                releaseWakeLock()
-                                if (Build.VERSION.SDK_INT >= 33) {
-                                    stopForeground(STOP_FOREGROUND_REMOVE)
-                                } else {
-                                    @Suppress("DEPRECATION") stopForeground(true)
-                                }
-                                stopSelf()
-                            }
-                        }
-                        else -> {}
-                    }
+                    stopSelf()
                 }
             }
         }
@@ -182,8 +171,6 @@ class PodroidService : Service() {
             withContext(Dispatchers.IO) {
                 try {
                     val rules = portForwardRepository.getRulesSnapshot().toMutableList()
-                    val ramMb = settingsRepository.getVmRamMbSnapshot()
-                    val cpus = settingsRepository.getVmCpusSnapshot()
                     val sshEnabled = settingsRepository.getSshEnabledSnapshot()
 
                     // Auto-inject SSH port forward when SSH is enabled
@@ -191,23 +178,22 @@ class PodroidService : Service() {
                         rules.add(com.excp.podroid.data.repository.PortForwardRule(SSH_HOST_PORT, 22, "tcp"))
                     }
 
-                    val androidIp = getAndroidLocalIp()
-                    podroidQemu.start(rules, ramMb, cpus, sshEnabled, androidIp)
+                    val config = com.excp.podroid.engine.PodroidQemu.LaunchConfig(
+                        ramMb = settingsRepository.getVmRamMbSnapshot(),
+                        cpus = settingsRepository.getVmCpusSnapshot(),
+                        sshEnabled = sshEnabled,
+                        androidIp = NetworkUtils.localIpv4(),
+                        storageSizeGb = settingsRepository.getStorageSizeGbSnapshot(),
+                        storageAccessEnabled = settingsRepository.getStorageAccessEnabledSnapshot(),
+                        qemuExtraArgs = settingsRepository.getQemuExtraArgsSnapshot(),
+                        kernelExtraCmdline = settingsRepository.getKernelExtraCmdlineSnapshot(),
+                    )
+                    podroidQemu.start(rules, config)
                 } catch (e: Exception) {
                     Log.e(TAG, "QEMU failed to start", e)
                 }
             }
         }
-    }
-
-    private fun getAndroidLocalIp(): String {
-        return try {
-            java.net.NetworkInterface.getNetworkInterfaces()
-                ?.asSequence()
-                ?.flatMap { it.inetAddresses.asSequence() }
-                ?.firstOrNull { !it.isLoopbackAddress && it is java.net.Inet4Address }
-                ?.hostAddress ?: "unknown"
-        } catch (_: Exception) { "unknown" }
     }
 
     private fun createNotificationChannel() {

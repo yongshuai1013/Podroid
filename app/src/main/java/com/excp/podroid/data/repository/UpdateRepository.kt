@@ -67,10 +67,16 @@ class UpdateRepository @Inject constructor(
         context.dataStore.edit { it[dismissedKey] = version }
     }
 
-    /** Returns true if `latest` is a higher version than `current`. */
+    /**
+     * Returns true if `latest` is a higher version than `current`. Compares the
+     * numeric core (`1.2.3`) first; if those are equal, treats a prerelease
+     * suffix (`-rc2`) as lower than a release, and falls back to lexicographic
+     * comparison of the suffixes themselves so 1.2.0-rc2 > 1.2.0-rc1.
+     */
     private fun isNewer(latest: String, current: String): Boolean {
-        val l = latest.substringBefore("-").split(".").map { it.toIntOrNull() ?: 0 }
-        val c = current.substringBefore("-").split(".").map { it.toIntOrNull() ?: 0 }
+        fun split(v: String) = v.substringBefore("-").split(".").map { it.toIntOrNull() ?: 0 }
+        val l = split(latest)
+        val c = split(current)
         val maxLen = maxOf(l.size, c.size)
         for (i in 0 until maxLen) {
             val lv = l.getOrElse(i) { 0 }
@@ -78,6 +84,14 @@ class UpdateRepository @Inject constructor(
             if (lv > cv) return true
             if (lv < cv) return false
         }
-        return false
+        // Numeric cores match — break ties by suffix. Empty suffix > any prerelease suffix.
+        val ls = latest.substringAfter("-", "")
+        val cs = current.substringAfter("-", "")
+        return when {
+            ls == cs -> false
+            ls.isEmpty() -> true   // "1.2.0" is newer than "1.2.0-rc1"
+            cs.isEmpty() -> false  // "1.2.0-rc1" is older than "1.2.0"
+            else -> ls > cs        // lexicographic compare for ordered prereleases
+        }
     }
 }

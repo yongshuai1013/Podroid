@@ -10,50 +10,19 @@
 package com.excp.podroid.engine
 
 /**
- * Lifecycle state of a running (or stopped) virtual machine.
- *
- * State transitions:
+ * Lifecycle state of the QEMU VM.
  *
  * ```
- *  Idle ──► Starting ──► Running ──► Paused
- *                          │            │
- *                          ▼            ▼
- *                        Saving      Resuming ──► Running
- *                          │
- *                          ▼
- *                        Stopped ──► Idle
- *                          │
- *                          ▼
- *                        Error
+ *   Idle ──► Starting ──► Running
+ *                ▲           │
+ *                │           ▼
+ *              Error      Stopped
  * ```
  */
 sealed class VmState {
-
-    /** No VM is active. */
-    data object Idle : VmState()
-
-    /** QEMU process is initializing. */
+    data object Idle     : VmState()
     data object Starting : VmState()
-
-    /** VM is running and the serial console is available. */
-    data object Running : VmState()
-
-    /** VM execution is paused (CPU halted, state preserved). */
-    data object Paused : VmState()
-
-    /** Saving VM state to disk via QEMU migration. */
-    data object Saving : VmState()
-
-    /** Restoring VM from a saved state snapshot. */
-    data object Resuming : VmState()
-
-    /** QEMU process has exited cleanly. */
-    data object Stopped : VmState()
-
-    /**
-     * An error occurred.
-     *
-     * @param message Human-readable description of what went wrong.
-     */
-    data class Error(val message: String) : VmState()
+    data object Running  : VmState()
+    data object Stopped  : VmState()
+    data class  Error(val message: String) : VmState()
 }

@@ -30,6 +30,7 @@ import android.net.LocalSocket
 import android.net.LocalSocketAddress
 import android.util.Log
 import com.excp.podroid.data.repository.PortForwardRule
+import com.excp.podroid.util.LogProxy
 import com.termux.terminal.TerminalSession
 import com.termux.terminal.TerminalSessionClient
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -39,7 +40,11 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import java.io.File
 import java.io.FileOutputStream
+import java.nio.ByteBuffer
+import java.nio.CharBuffer
+import java.nio.charset.CodingErrorAction
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -47,7 +52,6 @@ import javax.inject.Singleton
 @Singleton
 class PodroidQemu @Inject constructor(
     @ApplicationContext private val context: Context,
-    private val settingsRepository: com.excp.podroid.data.repository.SettingsRepository,
 ) {
     private val _state = MutableStateFlow<VmState>(VmState.Idle)
     val state: StateFlow<VmState> = _state.asStateFlow()
@@ -58,10 +62,8 @@ class PodroidQemu @Inject constructor(
     private val _bootStage = MutableStateFlow("")
 
     private var _terminalSession: TerminalSession? = null
-    private var _terminalSessionAttached = false
 
     val terminalSession: TerminalSession? get() = _terminalSession
-    val terminalSessionAttached: Boolean get() = _terminalSessionAttached
     val bootStage: StateFlow<String> = _bootStage.asStateFlow()
 
     @Volatile
@@ -86,6 +88,9 @@ class PodroidQemu @Inject constructor(
     private val consoleBuilder = StringBuilder()
     private val maxConsoleSize = 64 * 1024
 
+    /** Set once cleanup() has run for the current VM lifetime; reset by start(). */
+    private val cleanedUp = AtomicBoolean(true)
+
     /**
      * Proxy TerminalSessionClient — delegates to whatever real client is set.
      * Lets us create the bridge session at boot-complete time (before the
@@ -104,13 +109,14 @@ class PodroidQemu @Inject constructor(
         override fun onColorsChanged(s: TerminalSession) { sessionClientDelegate?.onColorsChanged(s) }
         override fun onTerminalCursorStateChange(state: Boolean) { sessionClientDelegate?.onTerminalCursorStateChange(state) }
         override fun getTerminalCursorStyle(): Int = sessionClientDelegate?.terminalCursorStyle ?: 0
-        override fun logError(tag: String?, msg: String?) { Log.e(tag ?: TAG, msg ?: "") }
-        override fun logWarn(tag: String?, msg: String?) { Log.w(tag ?: TAG, msg ?: "") }
-        override fun logInfo(tag: String?, msg: String?) { Log.i(tag ?: TAG, msg ?: "") }
-        override fun logDebug(tag: String?, msg: String?) { Log.d(tag ?: TAG, msg ?: "") }
-        override fun logVerbose(tag: String?, msg: String?) { Log.v(tag ?: TAG, msg ?: "") }
-        override fun logStackTraceWithMessage(tag: String?, msg: String?, e: Exception?) { Log.e(tag ?: TAG, msg, e) }
-        override fun logStackTrace(tag: String?, e: Exception?) { Log.e(tag ?: TAG, "Stack trace", e) }
+        override fun logError(tag: String?, msg: String?) = LogProxy.error(tag, TAG, msg)
+        override fun logWarn(tag: String?, msg: String?) = LogProxy.warn(tag, TAG, msg)
+        override fun logInfo(tag: String?, msg: String?) = LogProxy.info(tag, TAG, msg)
+        override fun logDebug(tag: String?, msg: String?) = LogProxy.debug(tag, TAG, msg)
+        override fun logVerbose(tag: String?, msg: String?) = LogProxy.verbose(tag, TAG, msg)
+        override fun logStackTraceWithMessage(tag: String?, msg: String?, e: Exception?) =
+            LogProxy.stackTraceWithMessage(tag, TAG, msg, e)
+        override fun logStackTrace(tag: String?, e: Exception?) = LogProxy.stackTrace(tag, TAG, e)
     }
 
     /**
@@ -152,7 +158,6 @@ class PodroidQemu @Inject constructor(
             )
             sess.updateSize(80, 24)
             _terminalSession = sess
-            _terminalSessionAttached = false
             Log.d(TAG, "Bridge auto-started on terminal.sock")
         }
     }
@@ -162,7 +167,6 @@ class PodroidQemu @Inject constructor(
 
         // Session already auto-started during boot — just return it
         if (_terminalSession != null) {
-            _terminalSessionAttached = true
             Log.d(TAG, "Returning pre-started terminal session")
             return _terminalSession!!
         }
@@ -185,16 +189,23 @@ class PodroidQemu @Inject constructor(
         sess.updateSize(80, 24)
 
         _terminalSession = sess
-        _terminalSessionAttached = true
         Log.d(TAG, "Terminal session created in Qemu singleton")
         return sess
     }
 
-    fun attachTerminalView() {
-        _terminalSessionAttached = true
-    }
-
     fun start() = start(emptyList())
+
+    /** All snapshotted settings the engine needs for a single VM launch. */
+    data class LaunchConfig(
+        val ramMb: Int = 512,
+        val cpus: Int = 1,
+        val sshEnabled: Boolean = false,
+        val androidIp: String = "unknown",
+        val storageSizeGb: Int = 2,
+        val storageAccessEnabled: Boolean = false,
+        val qemuExtraArgs: String = "",
+        val kernelExtraCmdline: String = "",
+    )
 
     fun start(
         portForwards: List<PortForwardRule>,
@@ -202,7 +213,9 @@ class PodroidQemu @Inject constructor(
         cpus: Int = 1,
         sshEnabled: Boolean = false,
         androidIp: String = "unknown",
-    ) {
+    ) = start(portForwards, LaunchConfig(ramMb = ramMb, cpus = cpus, sshEnabled = sshEnabled, androidIp = androidIp))
+
+    fun start(portForwards: List<PortForwardRule>, config: LaunchConfig) {
         if (_state.value is VmState.Starting || _state.value is VmState.Running) {
             Log.w(TAG, "start() called while VM is ${_state.value}, ignoring")
             return
@@ -213,8 +226,9 @@ class PodroidQemu @Inject constructor(
             return
         }
 
-        ensureStorageImage()
+        ensureStorageImage(config.storageSizeGb)
 
+        cleanedUp.set(false)
         _state.value = VmState.Starting
         consoleBuilder.clear()
         _consoleText.value = ""
@@ -229,8 +243,8 @@ class PodroidQemu @Inject constructor(
         File(qmpSocketPath).delete()
 
         try {
-            val cmd = buildCommand(qemuExe, portForwards, ramMb, cpus, sshEnabled, androidIp)
-            Log.d(TAG, "Launching: ${cmd.joinToString(" ")}")
+            val cmd = buildCommand(qemuExe, portForwards, config)
+            Log.d(TAG, "Launching QEMU with ${cmd.size} args: $cmd")
 
             val nativeDir = context.applicationInfo.nativeLibraryDir
             val pb = ProcessBuilder(cmd).directory(context.filesDir)
@@ -261,9 +275,8 @@ class PodroidQemu @Inject constructor(
             scope.launch { monitorBootSerial(proc) }
 
             val startMs = System.currentTimeMillis()
-            val timeoutMs = 10_000L
             var socketsReady = false
-            while (System.currentTimeMillis() - startMs < timeoutMs) {
+            while (System.currentTimeMillis() - startMs < SOCKET_READY_TIMEOUT_MS) {
                 if (!proc.isAlive) {
                     val exitCode = proc.exitValue()
                     Log.e(TAG, "QEMU died during startup, exit code: $exitCode")
@@ -279,9 +292,9 @@ class PodroidQemu @Inject constructor(
                 Thread.sleep(200)
             }
             if (!socketsReady) {
-                Log.e(TAG, "Socket timeout — QEMU sockets not ready after ${timeoutMs}ms")
+                Log.e(TAG, "Socket timeout — QEMU sockets not ready after ${SOCKET_READY_TIMEOUT_MS}ms")
                 proc.destroyForcibly()
-                throw RuntimeException("QEMU failed to create sockets within ${timeoutMs / 1000}s")
+                throw RuntimeException("QEMU failed to create sockets within ${SOCKET_READY_TIMEOUT_MS / 1000}s")
             }
 
             // State stays Starting — boot monitor will set Running when "Ready!" is detected
@@ -299,7 +312,8 @@ class PodroidQemu @Inject constructor(
             val exitCode = proc.waitFor()
             Log.d(TAG, "QEMU exited: $exitCode")
             cleanup()
-            _state.value = if (exitCode == 0) VmState.Stopped else VmState.Error("Exit code $exitCode")
+            _state.value = if (exitCode == 0) VmState.Stopped
+                else VmState.Error(formatExitError(exitCode, config.storageAccessEnabled))
         } catch (e: Exception) {
             Log.e(TAG, "Failed to start QEMU", e)
             _state.value = VmState.Error(e.message ?: "Unknown error")
@@ -322,9 +336,10 @@ class PodroidQemu @Inject constructor(
     private suspend fun monitorBootSerial(proc: Process) {
         val sockFile = File(serialSockPath)
 
-        // Wait up to 8s for QEMU to create the socket
-        var waited = 0
-        while (waited < 8000 && !sockFile.exists() && proc.isAlive) {
+        // Share the same socket-readiness deadline used by start() so a slow
+        // QEMU startup doesn't get inconsistent grace periods.
+        var waited = 0L
+        while (waited < SOCKET_READY_TIMEOUT_MS && !sockFile.exists() && proc.isAlive) {
             delay(100)
             waited += 100
         }
@@ -347,29 +362,46 @@ class PodroidQemu @Inject constructor(
         val logFile = File(context.filesDir, "console.log")
         logFile.delete()
 
+        // Streaming UTF-8 decoder — kept across read() calls so multi-byte
+        // sequences split between chunks decode correctly instead of
+        // surfacing as U+FFFD replacement chars in the in-memory console
+        // and breaking detectBootStage() matches.
+        val decoder = Charsets.UTF_8.newDecoder()
+            .onMalformedInput(CodingErrorAction.REPLACE)
+            .onUnmappableCharacter(CodingErrorAction.REPLACE)
+        val byteBuf = ByteBuffer.allocate(8192)
+        val charBuf = CharBuffer.allocate(8192)
+
         try {
             FileOutputStream(logFile, false).use { logOut ->
-                val buf = ByteArray(4096)
+                val readBuf = ByteArray(4096)
                 val input = sock.inputStream
                 while (true) {
                     val n = try {
-                        input.read(buf)
+                        input.read(readBuf)
                     } catch (_: Exception) {
                         break // socket closed by releaseSerial() or VM exit
                     }
                     if (n < 0) break
 
-                    val chunk = buf.copyOf(n)
-                    val text = String(chunk, Charsets.UTF_8)
-
-                    consoleBuilder.append(text)
-                    if (consoleBuilder.length > maxConsoleSize) {
-                        consoleBuilder.delete(0, consoleBuilder.length - maxConsoleSize)
-                    }
-                    _consoleText.value = consoleBuilder.toString()
-
-                    logOut.write(chunk, 0, n)
+                    // Raw bytes go straight to disk for the diagnostic log.
+                    logOut.write(readBuf, 0, n)
                     logOut.flush()
+
+                    // Feed the decoder; carry leftover undecoded bytes via compact().
+                    byteBuf.put(readBuf, 0, n)
+                    byteBuf.flip()
+                    decoder.decode(byteBuf, charBuf, false)
+                    byteBuf.compact()
+                    charBuf.flip()
+                    if (charBuf.hasRemaining()) {
+                        consoleBuilder.append(charBuf)
+                        if (consoleBuilder.length > maxConsoleSize) {
+                            consoleBuilder.delete(0, consoleBuilder.length - maxConsoleSize)
+                        }
+                        _consoleText.value = consoleBuilder.toString()
+                    }
+                    charBuf.clear()
 
                     if (_bootStage.value != "Ready") {
                         detectBootStage()
@@ -409,32 +441,34 @@ class PodroidQemu @Inject constructor(
         }
     }
 
+    /**
+     * Signal the VM to stop. Destroys the QEMU process; the start() coroutine's
+     * proc.waitFor() will fall through and run cleanup() + set the final state.
+     * Avoids the historical race where stop() and the start() exit-path both
+     * called cleanup() concurrently and fought over _state.value.
+     */
     fun stop() {
-        val proc = process
-        if (proc != null) {
-            proc.destroy()
-            try {
-                val exited = proc.waitFor(3, TimeUnit.SECONDS)
-                if (!exited) {
-                    proc.destroyForcibly()
-                    proc.waitFor(2, TimeUnit.SECONDS)
-                }
-            } catch (_: Exception) {
+        val proc = process ?: return
+        proc.destroy()
+        try {
+            if (!proc.waitFor(3, TimeUnit.SECONDS)) {
                 proc.destroyForcibly()
+                proc.waitFor(2, TimeUnit.SECONDS)
             }
+        } catch (_: Exception) {
+            proc.destroyForcibly()
         }
-        cleanup()
-        _state.value = VmState.Stopped
     }
 
+    @Synchronized
     private fun cleanup() {
+        if (cleanedUp.getAndSet(true)) return
         releaseSerial()
         ioScope?.cancel()
         ioScope = null
         process = null
         _terminalSession?.finishIfRunning()
         _terminalSession = null
-        _terminalSessionAttached = false
         sessionClientDelegate = null
         consoleBuilder.clear()
         _consoleText.value = ""
@@ -447,25 +481,15 @@ class PodroidQemu @Inject constructor(
     private fun buildCommand(
         qemuExe: File,
         portForwards: List<PortForwardRule>,
-        ramMb: Int,
-        cpus: Int,
-        sshEnabled: Boolean,
-        androidIp: String,
+        config: LaunchConfig,
     ): List<String> {
         val args = mutableListOf<String>()
-
-        // User-tunable extras (CPU model, accel tuning, RNG, overcommit, kernel cmdline extras).
-        // Pulled from SettingsRepository; falls back to the documented defaults.
-        val userQemuExtras = kotlinx.coroutines.runBlocking {
-            settingsRepository.getQemuExtraArgsSnapshot()
-        }.trim()
-        val userKernelExtras = kotlinx.coroutines.runBlocking {
-            settingsRepository.getKernelExtraCmdlineSnapshot()
-        }.trim()
+        val userQemuExtras = config.qemuExtraArgs.trim()
+        val userKernelExtras = config.kernelExtraCmdline.trim()
 
         args += "-M"; args += "virt,gic-version=3"
-        args += "-smp"; args += "$cpus"
-        args += "-m";   args += "$ramMb"
+        args += "-smp"; args += "${config.cpus}"
+        args += "-m";   args += "${config.ramMb}"
 
         val kernelPath = File(context.filesDir, "vmlinuz-virt")
         val initrdPath = File(context.filesDir, "initrd.img")
@@ -475,8 +499,8 @@ class PodroidQemu @Inject constructor(
             val cmdline = buildString {
                 append("console=ttyAMA0")
                 if (userKernelExtras.isNotEmpty()) append(" ").append(userKernelExtras)
-                append(" androidip=$androidIp")
-                if (sshEnabled) append(" ssh=1")
+                append(" androidip=").append(config.androidIp)
+                if (config.sshEnabled) append(" ssh=1")
             }
             args += "-append"; args += cmdline
         } else {
@@ -492,7 +516,7 @@ class PodroidQemu @Inject constructor(
         val storagePath = File(context.filesDir, "storage.img")
         if (storagePath.exists()) {
             args += "-object"; args += "iothread,id=iothread0"
-            args += "-device"; args += "virtio-blk-pci,drive=drive1,num-queues=$cpus,iothread=iothread0"
+            args += "-device"; args += "virtio-blk-pci,drive=drive1,num-queues=${config.cpus},iothread=iothread0"
             args += "-drive";  args += "file=${storagePath.absolutePath},if=none,id=drive1,format=raw,cache=writeback,aio=threads"
         }
 
@@ -500,15 +524,17 @@ class PodroidQemu @Inject constructor(
         val downloadsDir = android.os.Environment.getExternalStoragePublicDirectory(
             android.os.Environment.DIRECTORY_DOWNLOADS
         )
-        val storageAccessEnabled = kotlinx.coroutines.runBlocking {
-            settingsRepository.getStorageAccessEnabledSnapshot()
-        }
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R &&
-            storageAccessEnabled &&
+            config.storageAccessEnabled &&
             android.os.Environment.isExternalStorageManager() &&
             downloadsDir.exists()) {
+            // security_model=mapped-xattr keeps QEMU's 9p worker out of the
+            // chmod/chown syscall path that has triggered SIGILL on Tensor /
+            // ARMv9.2 PAC devices (Pixel 10) — uid/gid/mode are stored as
+            // xattrs on the host file instead of being applied directly.
+            // Falls back gracefully on filesystems without xattr support.
             args += "-fsdev"
-            args += "local,id=fsdev0,path=${downloadsDir.absolutePath},security_model=none"
+            args += "local,id=fsdev0,path=${downloadsDir.absolutePath},security_model=mapped-xattr"
             args += "-device"
             args += "virtio-9p-pci,fsdev=fsdev0,mount_tag=downloads"
         }
@@ -537,8 +563,7 @@ class PodroidQemu @Inject constructor(
         args += "-display"; args += "none"
         args += "-qmp";     args += "unix:$qmpSocketPath,server,nowait"
 
-        // User extras appended last so they can override earlier args where
-        // QEMU allows it (later -cpu / -accel overrides earlier ones).
+        // User extras appended last so later -cpu / -accel overrides earlier ones.
         if (userQemuExtras.isNotEmpty()) {
             args += userQemuExtras.split(Regex("\\s+"))
         }
@@ -546,12 +571,9 @@ class PodroidQemu @Inject constructor(
         return listOf(qemuExe.absolutePath) + args
     }
 
-    private fun ensureStorageImage() {
+    private fun ensureStorageImage(storageSizeGb: Int) {
         val storageFile = File(context.filesDir, "storage.img")
-        val gb = kotlinx.coroutines.runBlocking {
-            settingsRepository.getStorageSizeGbSnapshot().toLong()
-        }
-        val desiredBytes = gb * 1024L * 1024L * 1024L
+        val desiredBytes = storageSizeGb.toLong() * 1024L * 1024L * 1024L
 
         if (storageFile.exists()) {
             if (storageFile.length() == desiredBytes) return
@@ -561,7 +583,7 @@ class PodroidQemu @Inject constructor(
 
         try {
             java.io.RandomAccessFile(storageFile, "rw").use { it.setLength(desiredBytes) }
-            Log.d(TAG, "Created storage.img (${gb}GB)")
+            Log.d(TAG, "Created storage.img (${storageSizeGb}GB)")
         } catch (e: Exception) {
             Log.e(TAG, "Failed to create storage.img", e)
         }
@@ -572,7 +594,41 @@ class PodroidQemu @Inject constructor(
         return if (exe.exists()) exe else null
     }
 
+    /**
+     * Decode a QEMU process exit code into a user-facing error string. Process
+     * exit codes ≥128 are POSIX-encoded signals (128 + signum). On some devices
+     * (notably Tensor / ARMv9.2 PAC) virtio-9p crashes the QEMU worker with
+     * SIGILL — surface that as a Downloads-sharing hint rather than "Exit 132".
+     */
+    private fun formatExitError(exitCode: Int, storageSharingEnabled: Boolean): String {
+        if (exitCode < 128) return "QEMU exited with code $exitCode"
+        val sig = exitCode - 128
+        val name = when (sig) {
+            4  -> "SIGILL"
+            6  -> "SIGABRT"
+            7  -> "SIGBUS"
+            8  -> "SIGFPE"
+            9  -> "SIGKILL"
+            11 -> "SIGSEGV"
+            13 -> "SIGPIPE"
+            15 -> "SIGTERM"
+            31 -> "SIGSYS"
+            else -> "signal $sig"
+        }
+        // SIGILL/SIGBUS/SIGSEGV with Downloads sharing on points at virtio-9p
+        // on PAC-enforcing kernels — by far the most common crash path here.
+        val crashSignals = setOf(4, 7, 11)
+        return if (storageSharingEnabled && sig in crashSignals) {
+            "QEMU crashed ($name). Downloads sharing is unstable on this device — disable it in Settings and try again."
+        } else {
+            "QEMU crashed ($name)"
+        }
+    }
+
     companion object {
         private const val TAG = "PodroidQemu"
+
+        /** Shared deadline for both start()'s socket-readiness loop and monitorBootSerial's wait. */
+        private const val SOCKET_READY_TIMEOUT_MS = 10_000L
     }
 }

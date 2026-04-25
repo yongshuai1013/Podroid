@@ -2,19 +2,16 @@
  * Podroid - Rootless Podman for Android
  * Copyright (C) 2024 Podroid contributors
  *
- * Application class for Podroid.
+ * Application class — extracts QEMU, kernel, and initrd assets on first run
+ * (and on app upgrade when an asset's size changes).
  */
 package com.excp.podroid
 
 import android.app.Application
+import android.util.Log
 import dagger.hilt.android.HiltAndroidApp
 import java.io.File
 
-/**
- * Application class for Podroid.
- *
- * Extracts QEMU, kernel, and initrd assets on first run.
- */
 @HiltAndroidApp
 class PodroidApplication : Application() {
 
@@ -24,34 +21,37 @@ class PodroidApplication : Application() {
     }
 
     private fun extractAssets() {
-        // Extract QEMU BIOS/firmware files
         copyAssetDir("qemu", filesDir)
-
-        // Extract kernel and initrd
         copyAssetIfNeeded("vmlinuz-virt", filesDir)
         copyAssetIfNeeded("initrd.img", filesDir)
     }
 
+    /**
+     * Copies an asset to destDir if missing or size-different.
+     * Uses openFd() for an O(1) size lookup; that throws for compressed
+     * assets, in which case we fall back to always copying.
+     */
     private fun copyAssetIfNeeded(assetName: String, destDir: File) {
         val destFile = File(destDir, assetName)
-
         try {
-            // Try to get the uncompressed asset size for a cheap up-to-date check.
-            // openFd() throws for compressed entries — fall back to always copying in that case.
             val assetSize = try { assets.openFd(assetName).use { it.length } } catch (_: Exception) { -1L }
             if (assetSize >= 0 && destFile.exists() && destFile.length() == assetSize) return
 
             assets.open(assetName).use { input ->
                 destFile.parentFile?.mkdirs()
-                destFile.outputStream().use { output ->
-                    input.copyTo(output)
-                }
+                destFile.outputStream().use { output -> input.copyTo(output) }
             }
         } catch (e: Exception) {
-            // Asset might not exist - that's OK, we'll handle missing files at runtime
+            Log.w(TAG, "Failed to extract $assetName", e)
         }
     }
 
+    /**
+     * Walks an asset directory tree and mirrors it under destDir.
+     * Each file is copied if missing OR if its size differs (handles app
+     * upgrades that ship modified BIOS/keymap files — pre-1.1.6 this used
+     * !exists() and silently kept stale copies).
+     */
     private fun copyAssetDir(assetPath: String, destDir: File) {
         val entries = assets.list(assetPath) ?: return
         for (entry in entries) {
@@ -62,20 +62,25 @@ class PodroidApplication : Application() {
                 dest.mkdirs()
                 copyAssetDir(src, dest)
             } else {
-                if (!dest.exists()) {
-                    try {
-                        assets.open(src).use { input ->
-                            dest.outputStream().use { output ->
-                                input.copyTo(output)
-                            }
-                        }
-                    } catch (e: Exception) {
-                        // Skip if asset doesn't exist
-                    }
-                }
+                copyAssetFileIfNeeded(src, dest)
             }
         }
     }
 
+    private fun copyAssetFileIfNeeded(assetPath: String, destFile: File) {
+        try {
+            val assetSize = try { assets.openFd(assetPath).use { it.length } } catch (_: Exception) { -1L }
+            if (assetSize >= 0 && destFile.exists() && destFile.length() == assetSize) return
 
+            assets.open(assetPath).use { input ->
+                destFile.outputStream().use { output -> input.copyTo(output) }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to extract $assetPath", e)
+        }
+    }
+
+    companion object {
+        private const val TAG = "PodroidApp"
+    }
 }

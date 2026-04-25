@@ -2,14 +2,13 @@ package com.excp.podroid.ui.navigation
 
 import androidx.compose.material3.windowsizeclass.WindowSizeClass
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.hilt.navigation.compose.hiltViewModel
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.navigation.NavHostController
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
-import com.excp.podroid.data.repository.SettingsRepository
 import com.excp.podroid.ui.screens.home.HomeScreen
 import com.excp.podroid.ui.screens.settings.SettingsScreen
 import com.excp.podroid.ui.screens.setup.SetupScreen
@@ -25,11 +24,14 @@ object Routes {
 
 @Composable
 fun PodroidNavGraph(
-    settingsRepository: SettingsRepository,
     windowSizeClass: WindowSizeClass,
     navController: NavHostController = rememberNavController(),
 ) {
-    val isSetupDone by settingsRepository.isSetupDone.collectAsState(initial = null)
+    // Read isSetupDone from a Hilt-scoped helper so MainActivity doesn't need
+    // a field-injected SettingsRepository just to drive the start destination.
+    val isSetupDone by hiltViewModel<NavGraphViewModel>()
+        .isSetupDone
+        .collectAsStateWithLifecycle(initialValue = null)
 
     // Scoped to PodroidNavGraph composable — survives all navigation including popUpTo(0)
     val terminalViewModel: TerminalViewModel = hiltViewModel()

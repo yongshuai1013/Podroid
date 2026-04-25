@@ -36,15 +36,15 @@ class QmpClient(private val socketPath: String) {
                     val reader = BufferedReader(InputStreamReader(socket.inputStream))
                     val writer = OutputStreamWriter(socket.outputStream)
 
-                    // Read QMP greeting
+                    // Read QMP greeting (verbose-only: noisy and uninteresting on every command)
                     val greeting = reader.readLine()
-                    Log.d(TAG, "QMP greeting: $greeting")
+                    Log.v(TAG, "QMP greeting: $greeting")
 
                     // Send qmp_capabilities to enter command mode
                     writer.write("{\"execute\":\"qmp_capabilities\"}\n")
                     writer.flush()
                     val capResponse = reader.readLine()
-                    Log.d(TAG, "Capabilities response: $capResponse")
+                    Log.v(TAG, "Capabilities response: $capResponse")
 
                     // Send the actual command
                     val cmd = JSONObject().apply {
