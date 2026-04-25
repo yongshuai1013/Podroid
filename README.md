@@ -21,7 +21,7 @@
 
 ---
 
-Podroid spins up a lightweight Alpine Linux VM using QEMU and gives you a fully working [Podman](https://podman.io) container runtime with a built-in terminal. Install the APK, tap Start, and you're running containers in under a minute.
+Podroid spins up a lightweight Alpine Linux 3.23 VM using QEMU 11.0.0-rc2 and a custom Linux 6.6.87 kernel. It gives you a fully working [Podman](https://podman.io) container runtime with a built-in terminal. Install the APK, tap Start, and you're running containers in seconds.
 
 ---
 
@@ -29,30 +29,32 @@ Podroid spins up a lightweight Alpine Linux VM using QEMU and gives you a fully 
 
 ### Container Runtime
 - **Rootless Podman** — Full Docker-compatible container runtime with no root access required
-- **Persistent Storage** — Packages, configurations, and images survive restarts via overlayfs
-- **Out-of-the-box Networking** — Internet access enabled via QEMU SLIRP
+- **Custom Kernel** — Optimized Linux 6.6.87 kernel with netfilter, bridge, and overlayfs built-in for maximum performance
+- **Persistent Storage** — Packages, configurations, and images survive restarts via persistent ext4 storage and overlayfs
+- **Out-of-the-box Networking** — Internet access enabled via QEMU SLIRP; proper MASQUERADE support for container networking
 
 ### Terminal
-- **VT100/xterm Emulation** — Powered by Termux TerminalView
+- **xterm-256color Emulation** — Powered by Termux TerminalView v0.118.1
 - **Real PTY** — Proper job control, signal handling, and escape sequence support
 - **114 Color Themes** — Dracula, Nord, Solarized, Tokyo Night, Catppuccin, Gruvbox, and more
 - **13 Curated Fonts** — JetBrains Mono, Fira Code, Cascadia Code, Source Code Pro, Hack, and more
 - **Full Mouse Support** — CSI mouse tracking for btop, htop, mc, vim, and other TUI apps
 - **Extra Keys Bar** — ESC, TAB, CTRL, ALT (sticky), arrows, F1–F12, and common symbols
-- **Auto-resize** — vim, btop, nano automatically adapt to screen changes
+- **Auto-resize** — Optimized resize daemon with debounced SIGWINCH signals to stop cursor flashing during keyboard animations
 
 ### Networking
 - **Port Forwarding** — Expose VM services to your Android device via runtime QMP control
-- **Built-in SSH** — Dropbear server running on port 9922
+- **Built-in SSH** — Dropbear server running on port 9922 (configurable)
 
 ### Performance
-- **ARM64-native** — Executes directly on your device's CPU
-- **Multi-core Support** — Configure 1-8 CPU cores
-- **Allocatable RAM** — 512MB to 4GB configurable
+- **ARM64-native** — Executes directly on your device's CPU using QEMU TCG
+- **Multi-core Support** — Configure 1-8 CPU cores (tcg-thread=multi)
+- **Allocatable RAM** — 512MB to 4GB configurable; ZRAM swap enabled in guest for 2x effective memory
+- **16KB Page Support** — Optimized for newer Android devices (Pixel 8/9/10+) with 16KB system pages
 
 ### Storage
 - **2–64 GB** — Configurable persistent storage
-- **Downloads Sharing** — Mount Android Downloads folder via virtio-9p 
+- **Downloads Sharing** — Mount Android Downloads folder via virtio-9p with optimized msize
 
 ---
 
@@ -60,8 +62,8 @@ Podroid spins up a lightweight Alpine Linux VM using QEMU and gives you a fully 
 
 1. **Download** the latest APK from [Releases](https://github.com/ExTV/Podroid/releases)
 2. **Install** and open Podroid
-3. **Tap Start VM** — Boot progress shows in the notification
-4. **Wait ~20 seconds** for "Ready" status
+3. **Tap Start VM** — Boot progress shows via an animated tracker and notification
+4. **Wait ~10-15 seconds** for "Ready" status (as fast as 6s on high-end devices)
 5. **Tap Open Terminal** to access the shell
 6. **Run containers:**
 
@@ -86,8 +88,8 @@ podman ps -a
 | | |
 |---|---|
 | **Device** | ARM64 Android device (most phones from 2018+) |
-| **Android** | 9.0+ (API 28) |
-| **Storage** | ~150 MB app + VM disk size |
+| **Android** | Min SDK 28 (Android 9.0+), Target SDK 36. |
+| **Storage** | ~200 MB app + VM disk size |
 
 ---
 
@@ -96,25 +98,27 @@ podman ps -a
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                        Android App                          │
-│  ┌─────────────┐  ┌─────────────┐  ┌─────────────────┐      │
-│  │   Service   │  │  QEMU VM    │  │  Compose UI     │      │
-│  │  (WakeLock) │  │  (TCG)      │  │  Terminal View  │      │
-│  └─────────────┘  └───────┬─────┘  └─────────┬───────┘      │
-└───────────────────────────┼──────────────────┼──────────────┘
-                            │                  │
-                     ┌──────▼───────┐   ┌──────▼──────┐
-                     │ Alpine Linux │   │  PTY Bridge │
-                     │  + Podman    │◄──│  (serial)   │
-                     │  + Dropbear  │   └─────────────┘
-                     │  + SLIRP     │
-                     └──────────────┘
+│  ┌─────────────┐  ┌──────────────┐  ┌────────────────┐      │
+│  │   Service   │  │   QEMU 11    │  │   Compose UI   │      │
+│  │  (WakeLock) │  │   (TCG)      │  │ Terminal View  │      │
+│  └──────┬──────┘  └──────┬───────┘  └───────┬────────┘      │
+└─────────┼────────────────┼──────────────────┼───────────────┘
+          │                │                  │
+          │         ┌──────▼───────┐   ┌──────▼────────┐
+          │         │ Alpine 3.23  │   │  Podroid      │
+          └────────►│  + Podman    │◄──│  Bridge       │
+            Boot    │  + Kernel 6.6│   │ (virt-console)│
+            Stages  └──────────────┘   └───────────────┘
 ```
 
 **Boot Sequence:**
 1. QEMU loads custom Linux kernel + initramfs
-2. Phase 1 init mounts persistent ext4 as overlayfs
-3. Phase 2 configures networking, Podman, SSH, and serial console
-4. Terminal connects to serial console for interactive shell
+2. Phase 1 init mounts persistent storage.img as overlayfs
+3. Phase 2 configures networking, Podman, and starts the resize daemon
+4. **Three-channel I/O**:
+    - `serial.sock`: Kernel/boot log stream for the monitor (ttyAMA0)
+    - `terminal.sock`: Primary shell I/O for the bridge (virtio-console hvc0)
+    - `ctrl.sock`: Out-of-band resize signals (virtio-console hvc1)
 
 ---
 
@@ -122,8 +126,8 @@ podman ps -a
 
 ### Prerequisites
 
-- Docker (for VM initramfs and QEMU builds)
-- Android NDK (for bridge/Termux native builds)
+- Docker (for VM initramfs, kernel, and QEMU builds)
+- Android NDK r27c (for bridge/Termux native builds)
 - Android SDK
 
 ### Build Steps
@@ -133,37 +137,19 @@ podman ps -a
 git clone https://github.com/ExTV/Podroid.git
 cd Podroid
 
-# 1. Build VM initramfs and kernel (~3min, cached after)
+# 1. Build custom kernel (~10min, cached)
+./build-all.sh kernel
+
+# 2. Build VM initramfs (~5min)
 ./build-all.sh initramfs
 
-# 2. Build QEMU + bridge (~30min first time)
+# 3. Build QEMU + bridge via Docker (~30min first time)
 ./build-all.sh qemu
 
-# 3. Build Termux JNI lib (local NDK)
+# 4. Build Termux JNI lib (local NDK)
 ./build-all.sh termux
 
-# 4. Build the APK
-./gradlew assembleDebug
-
-# 5. Install
-adb uninstall com.excp.podroid.debug
-adb install -r app/build/outputs/apk/debug/app-debug.apk
-
-# Fast bridge rebuild (without full Docker build)
-NDK=$HOME/Android/Sdk/ndk/$(ls ~/Android/Sdk/ndk/ | tail -1)
-CC=$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android28-clang
-$CC --sysroot=$NDK/toolchains/llvm/prebuilt/linux-x86_64/sysroot \
-    -target aarch64-linux-android28 -fPIE -pie -Wl,-z,max-page-size=16384 \
-    podroid-bridge.c -o app/src/main/jniLibs/arm64-v8a/libpodroid-bridge.so
-./gradlew :app:installDebug
-
-# Full rebuild + deploy
-./build-all.sh all
-```
-
-Alternatively, build everything at once:
-```bash
-./build-all.sh all
+# 5. Build and install the APK
 ./gradlew installDebug
 ```
 
@@ -175,16 +161,16 @@ Alternatively, build everything at once:
 
 ```
 Podroid/
-├── app/                          # Android application
+├── app/                          # Android application (Compose)
 │   └── src/main/
-│       ├── java/                 # Kotlin source code
-│       ├── jniLibs/              # Native libraries (QEMU, bridge)
-│       └── assets/               # VM kernel, initramfs, fonts, themes
-├── init-podroid                  # VM initialization script
-├── podroid-bridge.c              # PTY ↔ Serial socket relay
-├── build-all.sh                  # Unified build script (initramfs/qemu/termux/all)
-├── Dockerfile                    # VM initramfs builder (multi-stage)
-├── gradle.properties              # Build config (QEMU version, etc.)
+│       ├── java/                 # Kotlin source (Engine, UI, Data)
+│       ├── jniLibs/              # Native binaries (.so renamed ELF)
+│       └── assets/               # Kernel, initramfs, fonts, themes
+├── init-podroid                  # Two-phase VM bootstrap script
+├── podroid-bridge.c              # PTY ↔ virtio-console socket relay
+├── build-all.sh                  # Unified build-everything script
+├── Dockerfile                    # Multi-stage CI/CD build pipeline
+├── podroid_kernel.config         # Custom Linux kernel configuration
 └── gradlew                       # Gradle wrapper
 ```
 
@@ -192,20 +178,17 @@ Podroid/
 
 | File | Description |
 |------|-------------|
-| `libqemu-system-aarch64.so` | QEMU executable (PIE, 16KB page aligned) |
-| `libslirp.so` | SLIRP networking library |
-| `libpodroid-bridge.so` | Terminal PTY ↔ Serial socket relay |
-| `libtermux.so` | Terminal emulation library (16KB page aligned) |
+| `libqemu-system-aarch64.so` | QEMU TCG engine |
+| `libpodroid-bridge.so` | Stateful PTY relay with SIGWINCH debouncing |
+| `libtermux.so` | Terminal emulator JNI |
+| `libslirp.so` | SLIRP user-mode networking |
 
 ---
 
-
-
 ## TODO
 
-
-- [ ] **Better QEMU performance** — TCG optimization, and performance profiling
-- [ ] **Better terminal integration** — Improve TUI app support (nvim, vim, less, nano) with proper CSI escape sequence handling and resize propagation
+- [x] **Better QEMU performance** — TCG optimization, and performance profiling
+- [x] **Better terminal integration** — Improve TUI app support (nvim, vim, less, nano) with proper CSI escape sequence handling and resize propagation
 - [ ] **User account instead of root** — Run VM processes as a non-root user for improved security
 - [ ] **Docker socket compatibility** — Proper service scripts for `rc-service` and `docker` commands
 
@@ -242,3 +225,6 @@ The skill file includes complete architecture, all source files, build commands,
 ## License
 
 [GNU General Public License v2.0](LICENSE)
+c License v2.0](LICENSE)
+2.0](LICENSE)
+
