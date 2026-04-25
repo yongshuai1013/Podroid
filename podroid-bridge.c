@@ -33,15 +33,30 @@
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <termios.h>
+#include <time.h>
 #include <unistd.h>
+
+/* Coalesce per-frame SIGWINCH bursts (Android keyboard slide fires ~25 of
+ * them in 200 ms) into a single RESIZE message. The shell only redraws once,
+ * so the user sees one prompt redraw at the end of the animation instead of
+ * 25 cursor flashes during it. */
+#define RESIZE_DEBOUNCE_MS 200
 
 static volatile sig_atomic_t g_winch    = 0;
 static volatile sig_atomic_t g_shutdown = 0;
 static int                   g_ctrl_fd   = -1;
 static int                   g_term_fd   = -1;
+static int                   g_winch_pending  = 0;
+static long                  g_winch_last_ms  = 0;
 
 static void on_winch(int sig) { (void)sig; g_winch = 1; }
 static void on_term(int sig)  { (void)sig; g_shutdown = 1; }
+
+static long now_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (long)ts.tv_sec * 1000L + ts.tv_nsec / 1000000L;
+}
 
 static int connect_unix(const char *path, int max_attempts, unsigned int delay_us) {
     for (int attempt = 0; attempt < max_attempts; attempt++) {
@@ -140,7 +155,18 @@ int main(int argc, char *argv[]) {
 
     for (;;) {
         if (g_shutdown) break;
-        if (g_winch)    { g_winch = 0; send_resize(); }
+        // Coalesce SIGWINCH bursts: every signal just refreshes the timestamp.
+        // The actual send_resize() is fired below once the burst has been
+        // quiet for RESIZE_DEBOUNCE_MS.
+        if (g_winch) {
+            g_winch = 0;
+            g_winch_pending = 1;
+            g_winch_last_ms = now_ms();
+        }
+        if (g_winch_pending && now_ms() - g_winch_last_ms >= RESIZE_DEBOUNCE_MS) {
+            g_winch_pending = 0;
+            send_resize();
+        }
 
         fd_set rfds;
         FD_ZERO(&rfds);
