@@ -372,7 +372,7 @@ class PodroidQemu @Inject constructor(
                     logOut.flush()
 
                     if (_bootStage.value != "Ready") {
-                        detectBootStage(text)
+                        detectBootStage()
                     }
                 }
             }
@@ -385,7 +385,14 @@ class PodroidQemu @Inject constructor(
         }
     }
 
-    private fun detectBootStage(text: String) {
+    private fun detectBootStage() {
+        // Use the existing consoleBuilder as a stateful buffer.
+        // We only scan the last 1024 characters for performance, which is
+        // plenty for matching our short boot stage strings even if split.
+        val bufferLen = consoleBuilder.length
+        val scanLen = if (bufferLen > 1024) 1024 else bufferLen
+        val text = consoleBuilder.substring(bufferLen - scanLen)
+
         when {
             text.contains("Ready!") -> {
                 _bootStage.value = "Ready"
