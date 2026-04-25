@@ -48,7 +48,9 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import kotlinx.coroutines.launch
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
@@ -81,6 +83,8 @@ fun TerminalScreen(
     val vmState by viewModel.vmState.collectAsState()
     val fontSize by viewModel.terminalFontSize.collectAsState()
     val showQuickSettings by viewModel.showQuickSettings.collectAsState()
+    val showExtraKeys by viewModel.showExtraKeysFlow.collectAsState()
+    val hapticsEnabled by viewModel.hapticsEnabledFlow.collectAsState()
 
     DisposableEffect(Unit) {
         val activity = context as? Activity
@@ -112,14 +116,20 @@ fun TerminalScreen(
     val colorTheme by viewModel.terminalColorTheme.collectAsState()
     val terminalFont by viewModel.terminalFont.collectAsState()
 
+    // Resolve the typeface and background palette from settings. Both run on
+    // recomposition because they're cheap (asset reads, font cache lookup) and
+    // the result drives the View setters in LaunchedEffect below.
+    val typeface = remember(terminalFont) { viewModel.loadFont(terminalFont) }
+    val themeBg = remember(colorTheme) { viewModel.loadColorTheme(colorTheme) }
+
     if (showQuickSettings) {
         QuickSettingsDialog(
             fontSize = fontSize,
             onFontSizeChange = { viewModel.setTerminalFontSize(it) },
             onDismiss = { viewModel.closeQuickSettings() },
-            showExtraKeys = viewModel.showExtraKeys,
+            showExtraKeys = showExtraKeys,
             onToggleExtraKeys = { viewModel.updateShowExtraKeys(it) },
-            hapticsEnabled = viewModel.hapticsEnabled,
+            hapticsEnabled = hapticsEnabled,
             onToggleHaptics = { viewModel.updateHapticsEnabled(it) },
             colorTheme = colorTheme,
             onColorThemeChange = { viewModel.setTerminalColorTheme(it) },
@@ -135,7 +145,7 @@ fun TerminalScreen(
             .windowInsetsPadding(WindowInsets.ime)
     ) {
         TopAppBar(
-            title = { Text("Terminal", color = Color.White) },
+            title = { Text("Terminal") },
             navigationIcon = {
                 IconButton(onClick = {
                     val imm = context.getSystemService(android.content.Context.INPUT_METHOD_SERVICE)
@@ -145,29 +155,30 @@ fun TerminalScreen(
                     }
                     onNavigateBack()
                 }) {
-                    Icon(
-                        Icons.AutoMirrored.Filled.ArrowBack,
-                        contentDescription = "Back",
-                        tint = Color.White,
-                    )
+                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
                 }
             },
             actions = {
                 IconButton(onClick = { viewModel.openQuickSettings() }) {
-                    Text("⚙", color = Color.White, fontSize = 18.sp)
+                    Text("⚙", fontSize = 18.sp)
                 }
             },
-            colors = TopAppBarDefaults.topAppBarColors(containerColor = Color(0xFF1A1A1A)),
         )
 
         when (vmState) {
             is VmState.Idle, is VmState.Stopped -> {
                 Box(modifier = Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        Text("VM Not Running", color = Color.Red, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                        Text(
+                            "VM Not Running",
+                            color = MaterialTheme.colorScheme.error,
+                            fontSize = 18.sp,
+                            fontWeight = FontWeight.Bold,
+                        )
                         Text(
                             "Start the VM from Home screen first",
-                            color = Color.Gray, fontSize = 14.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            fontSize = 14.sp,
                             modifier = Modifier.padding(top = 8.dp),
                         )
                     }
@@ -177,52 +188,63 @@ fun TerminalScreen(
             is VmState.Error -> {
                 Box(modifier = Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        Text("Error", color = Color.Red, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                        Text(
+                            "Error",
+                            color = MaterialTheme.colorScheme.error,
+                            fontSize = 18.sp,
+                            fontWeight = FontWeight.Bold,
+                        )
                         Text(
                             (vmState as VmState.Error).message,
-                            color = Color.Gray, fontSize = 14.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            fontSize = 14.sp,
                             modifier = Modifier.padding(top = 8.dp, start = 16.dp, end = 16.dp),
                             textAlign = TextAlign.Center,
                         )
                         Spacer(modifier = Modifier.height(16.dp))
-                        Text(
-                            "Tap to Retry",
-                            color = Color(0xFF4FC3F7), fontSize = 14.sp, fontWeight = FontWeight.Bold,
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(8.dp))
-                                .background(Color(0xFF333333))
-                                .clickable { onNavigateBack() }
-                                .padding(horizontal = 24.dp, vertical = 12.dp),
-                        )
+                        FilledTonalButton(onClick = onNavigateBack) {
+                            Text("Tap to Retry")
+                        }
                     }
                 }
             }
 
-            is VmState.Starting, is VmState.Paused, is VmState.Saving, is VmState.Resuming -> {
+            is VmState.Starting -> {
                 Box(modifier = Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        CircularProgressIndicator(color = Color(0xFF4FC3F7), strokeWidth = 3.dp)
-                        Spacer(modifier = Modifier.height(16.dp))
-                        Text(
-                            when (vmState) {
-                                is VmState.Paused   -> "VM Paused"
-                                is VmState.Saving   -> "Saving state..."
-                                is VmState.Resuming -> "Resuming..."
-                                else                -> ""
-                            },
-                            color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Bold,
-                        )
-                    }
+                    CircularProgressIndicator(
+                        color = MaterialTheme.colorScheme.primary,
+                        strokeWidth = 3.dp,
+                    )
                 }
             }
 
             is VmState.Running -> {
                 Box(modifier = Modifier.weight(1f).fillMaxSize()) {
-                    val view = viewModel.getOrCreateTerminalView()
+                    // The View is created per-Composition-context (i.e. per Activity).
+                    // Caching it across config changes used to leak the destroyed Activity.
+                    val view = remember(context) {
+                        TerminalView(context, null).apply {
+                            setTextSize(fontSize)
+                            keepScreenOn = true
+                            isFocusable = true
+                            isFocusableInTouchMode = true
+                        }
+                    }
 
-                    DisposableEffect(vmState) {
+                    LaunchedEffect(view, themeBg) {
+                        view.setBackgroundColor(themeBg ?: android.graphics.Color.BLACK)
+                    }
+                    LaunchedEffect(view, typeface) {
+                        view.setTypeface(typeface)
+                        view.post {
+                            viewModel.forceUpdateSizeFromView(view, typeface)
+                            view.updateSize()
+                        }
+                    }
+
+                    DisposableEffect(view, vmState) {
                         viewModel.resetOnRestart()
-                        viewModel.attachView(view)
+                        viewModel.bindView(view)
                         viewModel.createSession()
                         view.setTerminalViewClient(viewModel.viewClient)
                         val sess = viewModel.session
@@ -231,45 +253,38 @@ fun TerminalScreen(
                             view.mEmulator = sess.emulator
                         }
                         view.requestFocus()
-
-                        // Session may have buffered MOTD + prompt bytes before the view
-                        // attached (the proxy SessionClient's onTextChanged no-ops when
-                        // the delegate is null). Force a repaint so the emulator's
-                        // existing state draws on first layout.
                         view.onScreenUpdated()
 
-                        // Push initial cols/rows once the view has laid out.
-                        // forceUpdateSizeFromView is the Paint-based fallback that works
-                        // before mRenderer is initialized; view.updateSize() is the renderer
-                        // path called last so it wins once metrics are ready.
                         view.post {
-                            viewModel.forceUpdateSizeFromView(view)
+                            viewModel.forceUpdateSizeFromView(view, typeface)
                             view.updateSize()
                             view.onScreenUpdated()
                         }
+                        onDispose { viewModel.bindView(null) }
+                    }
 
-                        // Keyboard animation fires one layout change per frame (~25 events).
-                        // Debounce so SIGWINCH only fires once after the view has been stable
-                        // for 150 ms — turns 25 prompt-redraw flashes into one.
-                        val resizeHandler = android.os.Handler(android.os.Looper.getMainLooper())
-                        var pendingResize: Runnable? = null
-                        val listener = android.view.View.OnLayoutChangeListener { v, left, top, right, bottom,
-                                                         oldLeft, oldTop, oldRight, oldBottom ->
+                    // Layout-change debounce: keyboard slide animation fires ~25 layout
+                    // events. Coroutine debounce collapses them to one SIGWINCH.
+                    val scope = rememberCoroutineScope()
+                    DisposableEffect(view) {
+                        var pending: kotlinx.coroutines.Job? = null
+                        val listener = android.view.View.OnLayoutChangeListener {
+                            v, left, top, right, bottom, oldLeft, oldTop, oldRight, oldBottom ->
                             val w = right - left
                             val h = bottom - top
                             if (w <= 0 || h <= 0) return@OnLayoutChangeListener
                             if (w == oldRight - oldLeft && h == oldBottom - oldTop) return@OnLayoutChangeListener
-                            pendingResize?.let { resizeHandler.removeCallbacks(it) }
-                            val r = Runnable {
-                                viewModel.forceUpdateSizeFromView(v as TerminalView)
-                                v.updateSize()
+                            pending?.cancel()
+                            pending = scope.launch {
+                                kotlinx.coroutines.delay(150)
+                                val tv = v as TerminalView
+                                viewModel.forceUpdateSizeFromView(tv, typeface)
+                                tv.updateSize()
                             }
-                            pendingResize = r
-                            resizeHandler.postDelayed(r, 150)
                         }
                         view.addOnLayoutChangeListener(listener)
                         onDispose {
-                            pendingResize?.let { resizeHandler.removeCallbacks(it) }
+                            pending?.cancel()
                             view.removeOnLayoutChangeListener(listener)
                         }
                     }
@@ -278,9 +293,6 @@ fun TerminalScreen(
                         factory = { view },
                         update = { v ->
                             v.setTextSize(fontSize)
-                            // setTextSize recreates mRenderer with new metrics; one updateSize
-                            // post-layout is enough because virtio-console reliably delivers
-                            // RESIZE to the VM (no need for the old multi-shot retries).
                             v.post { v.updateSize() }
                         },
                         modifier = Modifier.fillMaxSize(),
@@ -289,7 +301,7 @@ fun TerminalScreen(
             }
         }
 
-        if (viewModel.showExtraKeys) {
+        if (showExtraKeys) {
             AdaptiveContainer(
                 windowSizeClass = windowSizeClass,
                 maxWidth = 800
@@ -313,7 +325,7 @@ private fun ExtraKeysRow(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .background(Color(0xFF1A1A1A))
+            .background(MaterialTheme.colorScheme.surfaceVariant)
             .horizontalScroll(rememberScrollState())
             .padding(horizontal = 4.dp, vertical = 4.dp),
         horizontalArrangement = Arrangement.spacedBy(3.dp),
@@ -391,14 +403,14 @@ private fun KeyButton(
     }
     Text(
         text = label,
-        color = if (isActive) Color.Black else Color(0xFFCCCCCC),
+        color = if (isActive) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurface,
         fontSize = 12.sp,
         fontWeight = FontWeight.Medium,
         fontFamily = FontFamily.Monospace,
         textAlign = TextAlign.Center,
         modifier = Modifier
             .clip(RoundedCornerShape(4.dp))
-            .background(if (isActive) Color(0xFF4FC3F7) else Color(0xFF333333))
+            .background(if (isActive) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surface)
             .then(tapModifier)
             .padding(horizontal = 10.dp, vertical = 8.dp),
     )
@@ -512,14 +524,9 @@ private fun ThemeSelectionDialog(
     currentTheme: String,
     onThemeSelect: (String) -> Unit,
     onDismiss: () -> Unit,
+    viewModel: TerminalViewModel = hiltViewModel(),
 ) {
-    val context = LocalContext.current
-    val themes = remember {
-        listOf("default") + (context.assets.list("colors")?.toList()
-            ?.filter { it.endsWith(".properties") }
-            ?.mapNotNull { it?.removeSuffix(".properties") }
-            ?.sorted() ?: emptyList())
-    }
+    val themes = remember { viewModel.listAssetNames("colors", ".properties") }
     
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -560,14 +567,9 @@ private fun FontSelectionDialog(
     currentFont: String,
     onFontSelect: (String) -> Unit,
     onDismiss: () -> Unit,
+    viewModel: TerminalViewModel = hiltViewModel(),
 ) {
-    val context = LocalContext.current
-    val fonts = remember {
-        listOf("default") + (context.assets.list("fonts")?.toList()
-            ?.filter { it.endsWith(".ttf") }
-            ?.mapNotNull { it?.removeSuffix(".ttf") }
-            ?.sorted() ?: emptyList())
-    }
+    val fonts = remember { viewModel.listAssetNames("fonts", ".ttf") }
     
     AlertDialog(
         onDismissRequest = onDismiss,

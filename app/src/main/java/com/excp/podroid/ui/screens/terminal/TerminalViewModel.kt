@@ -24,9 +24,7 @@
  */
 package com.excp.podroid.ui.screens.terminal
 
-import android.annotation.SuppressLint
 import android.content.Context
-import android.graphics.Color
 import android.graphics.Typeface
 import android.os.Build
 import android.os.VibrationEffect
@@ -44,6 +42,7 @@ import androidx.lifecycle.viewModelScope
 import com.excp.podroid.data.repository.SettingsRepository
 import com.excp.podroid.engine.PodroidQemu
 import com.excp.podroid.engine.VmState
+import com.excp.podroid.util.LogProxy
 import com.termux.terminal.TerminalEmulator
 import com.termux.terminal.TerminalSession
 import com.termux.terminal.TerminalSessionClient
@@ -76,12 +75,15 @@ class TerminalViewModel @Inject constructor(
     val terminalFont: StateFlow<String> = settingsRepository.terminalFont
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), "default")
 
-    // Quick-UI state (non-persistent for now)
-    var showExtraKeys by mutableStateOf(true)
-        private set
+    // Persisted across sessions — was previously transient in-memory only.
+    val showExtraKeysFlow: StateFlow<Boolean> = settingsRepository.showExtraKeys
+        .stateIn(viewModelScope, SharingStarted.Eagerly, true)
+    val hapticsEnabledFlow: StateFlow<Boolean> = settingsRepository.hapticsEnabled
+        .stateIn(viewModelScope, SharingStarted.Eagerly, true)
 
-    var hapticsEnabled by mutableStateOf(true)
-        private set
+    /** Mirrors of the persisted flows for callers that want a synchronous read. */
+    val showExtraKeys: Boolean get() = showExtraKeysFlow.value
+    val hapticsEnabled: Boolean get() = hapticsEnabledFlow.value
 
     // Trigger for opening the Quick Settings drawer (composable-side reacts via StateFlow)
     private val _showQuickSettings = kotlinx.coroutines.flow.MutableStateFlow(false)
@@ -89,27 +91,14 @@ class TerminalViewModel @Inject constructor(
 
     // Quick settings helpers (non-persistent)
     fun openQuickSettings() { _showQuickSettings.value = true }
-    fun closeQuickSettings() {
-        _showQuickSettings.value = false
-        // Push the final terminal size now that settings are committed.
-        // Covers the case where rapid slider drags sent stale intermediate sizes to the VM.
-        pushSizeNow()
-    }
+    fun closeQuickSettings() { _showQuickSettings.value = false }
 
-    /**
-     * Re-push the current cols/rows to the session and VM resize daemon.
-     * Call after any setting that changes character cell dimensions.
-     */
-    fun pushSizeNow() {
-        val v = terminalView ?: return
-        v.post {
-            v.updateSize()
-            v.onScreenUpdated()
-        }
+    fun updateShowExtraKeys(value: Boolean) {
+        viewModelScope.launch { settingsRepository.setShowExtraKeys(value) }
     }
-
-    fun updateShowExtraKeys(value: Boolean) { showExtraKeys = value }
-    fun updateHapticsEnabled(value: Boolean) { hapticsEnabled = value }
+    fun updateHapticsEnabled(value: Boolean) {
+        viewModelScope.launch { settingsRepository.setHapticsEnabled(value) }
+    }
 
     fun setTerminalFontSize(value: Int) {
         viewModelScope.launch {
@@ -118,111 +107,64 @@ class TerminalViewModel @Inject constructor(
     }
 
     fun setTerminalColorTheme(value: String) {
-        viewModelScope.launch {
-            settingsRepository.setTerminalColorTheme(value)
-            copyColorThemeToFilesDirAndApply(value)
-        }
+        viewModelScope.launch { settingsRepository.setTerminalColorTheme(value) }
     }
 
     fun setTerminalFont(value: String) {
-        viewModelScope.launch {
-            settingsRepository.setTerminalFont(value)
-            copyFontToFilesDirAndApply(value)
-        }
-    }
-    
-    private suspend fun copyColorThemeToFilesDirAndApply(theme: String) {
-        val colorFile = java.io.File(context.filesDir, "colors.properties")
-        var bgColor = android.graphics.Color.BLACK
-        if (theme == "default") {
-            colorFile.delete()
-        } else {
-            try {
-                val bytes = context.assets.open("colors/$theme.properties").use { it.readBytes() }
-                val props = java.util.Properties()
-                props.load(bytes.inputStream())
-                TerminalColors.COLOR_SCHEME.updateWith(props)
-                val bgHex = props["background"] as? String
-                bgColor = bgHex?.let { parseColor(it) } ?: android.graphics.Color.BLACK
-                colorFile.writeBytes(bytes)
-            } catch (_: Exception) {
-                colorFile.delete()
-            }
-        }
-        terminalView?.setBackgroundColor(bgColor)
-    }
-    
-    private suspend fun copyFontToFilesDirAndApply(font: String) {
-        val fontFile = java.io.File(context.filesDir, "font.ttf")
-        var typeface: Typeface = Typeface.MONOSPACE
-        if (font == "default") {
-            fontFile.delete()
-        } else {
-            try {
-                context.assets.open("fonts/$font.ttf").use { inp ->
-                    fontFile.outputStream().use { out -> inp.copyTo(out) }
-                }
-                typeface = Typeface.createFromFile(fontFile)
-            } catch (_: Exception) {
-                fontFile.delete()
-            }
-        }
-        currentTypeface = typeface
-        terminalView?.setTypeface(typeface)
-        terminalView?.let { v ->
-            v.post { forceUpdateSizeFromView(v); v.updateSize() }
-        }
+        viewModelScope.launch { settingsRepository.setTerminalFont(value) }
     }
 
-    @SuppressLint("StaticFieldLeak") // created once per ViewModel lifetime; ViewModel is nav-scoped
-    private var terminalView: TerminalView? = null
     private var attached = false
 
-    // Tracks the active terminal typeface so forceUpdateSizeFromView uses correct char metrics.
-    private var currentTypeface: Typeface = Typeface.MONOSPACE
+    /**
+     * Weak handle to the currently-attached TerminalView. Used only by client
+     * callbacks that need to call onScreenUpdated() / showSoftInput(), which
+     * fire from non-UI threads. WeakReference prevents leaking the destroyed
+     * Activity across config changes.
+     */
+    private var viewRef: java.lang.ref.WeakReference<TerminalView>? = null
 
-    fun getOrCreateTerminalView(): TerminalView {
-        Log.d(TAG, "getOrCreateTerminalView called, current view: $terminalView, this: ${System.identityHashCode(this)}")
-        terminalView?.let { return it }
-
-        val colorFile = java.io.File(context.filesDir, "colors.properties")
-        val bgColor = if (colorFile.exists()) {
-            try {
-                val props = java.util.Properties()
-                colorFile.inputStream().use { props.load(it) }
-                TerminalColors.COLOR_SCHEME.updateWith(props)
-                val bgHex = props["background"] as? String
-                if (bgHex != null) parseColor(bgHex) else android.graphics.Color.BLACK
-            } catch (_: Exception) { android.graphics.Color.BLACK }
-        } else {
-            android.graphics.Color.BLACK
-        }
-
-        val fontFile = java.io.File(context.filesDir, "font.ttf")
-        val typeface = if (fontFile.exists()) {
-            try { Typeface.createFromFile(fontFile) } catch (_: Exception) { Typeface.MONOSPACE }
-        } else { Typeface.MONOSPACE }
-        currentTypeface = typeface
-
-        val view = TerminalView(context, null).apply {
-            setBackgroundColor(bgColor)
-            setTextSize(terminalFontSize.value)
-            setTypeface(typeface)
-            setTerminalViewClient(viewClient)
-            keepScreenOn = true
-            isFocusable = true
-            isFocusableInTouchMode = true
-        }
-
-        // Reattach existing session to new view
-        session?.let { sess ->
-            view.mTermSession = sess
-            view.mEmulator = sess.emulator
-        }
-
-        terminalView = view
-        return view
+    fun bindView(view: TerminalView?) {
+        viewRef = view?.let { java.lang.ref.WeakReference(it) }
     }
+
+    /**
+     * Resolve a theme name to the (background, Properties) pair, also pushing
+     * the palette into TerminalColors.COLOR_SCHEME so the renderer picks it up.
+     * Returns null background for the built-in default.
+     */
+    fun loadColorTheme(theme: String): Int? = if (theme == "default") {
+        null
+    } else try {
+        val props = java.util.Properties()
+        context.assets.open("colors/$theme.properties").use { props.load(it) }
+        TerminalColors.COLOR_SCHEME.updateWith(props)
+        (props["background"] as? String)?.let { parseColor(it) }
+    } catch (_: Exception) { null }
+
+    /** Lists asset files in `dir` whose name ends with `suffix`, with the suffix stripped. */
+    fun listAssetNames(dir: String, suffix: String): List<String> {
+        val items = try {
+            context.assets.list(dir)?.toList() ?: emptyList()
+        } catch (_: Exception) { emptyList() }
+        return listOf("default") + items.filter { it.endsWith(suffix) }.map { it.removeSuffix(suffix) }.sorted()
+    }
+
+    /** Resolve a font name to a Typeface. Returns Typeface.MONOSPACE for default or on error. */
+    fun loadFont(font: String): Typeface = if (font == "default") {
+        Typeface.MONOSPACE
+    } else try {
+        // assets.openFd is a file descriptor — Typeface.createFromFile needs a real path,
+        // so we copy on demand into a per-launch cache file. Same disk hit as before but
+        // no DataStore-shadowed state on filesDir.
+        val cacheFile = java.io.File(context.cacheDir, "font_$font.ttf")
+        if (!cacheFile.exists()) {
+            context.assets.open("fonts/$font.ttf").use { inp ->
+                cacheFile.outputStream().use { out -> inp.copyTo(out) }
+            }
+        }
+        Typeface.createFromFile(cacheFile)
+    } catch (_: Exception) { Typeface.MONOSPACE }
 
     private fun parseColor(hex: String): Int {
         val clean = hex.removePrefix("#")
@@ -255,8 +197,10 @@ class TerminalViewModel @Inject constructor(
     var session: TerminalSession? = null
         private set
 
-    var extraCtrl = false
-    var extraAlt = false
+    var extraCtrl by mutableStateOf(false)
+        private set
+    var extraAlt by mutableStateOf(false)
+        private set
 
     private val vibrator: Vibrator by lazy {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
@@ -269,7 +213,7 @@ class TerminalViewModel @Inject constructor(
 
     val sessionClient = object : TerminalSessionClient {
         override fun onTextChanged(changedSession: TerminalSession) {
-            terminalView?.onScreenUpdated()
+            viewRef?.get()?.onScreenUpdated()
         }
         override fun onTitleChanged(changedSession: TerminalSession) {}
         override fun onSessionFinished(finishedSession: TerminalSession) {}
@@ -295,27 +239,23 @@ class TerminalViewModel @Inject constructor(
         override fun onColorsChanged(session: TerminalSession) {}
         override fun onTerminalCursorStateChange(state: Boolean) {}
         override fun getTerminalCursorStyle(): Int = 0
-        override fun logError(tag: String?, message: String?) { Log.e(tag ?: TAG, message ?: "") }
-        override fun logWarn(tag: String?, message: String?) { Log.w(tag ?: TAG, message ?: "") }
-        override fun logInfo(tag: String?, message: String?) { Log.i(tag ?: TAG, message ?: "") }
-        override fun logDebug(tag: String?, message: String?) { Log.d(tag ?: TAG, message ?: "") }
-        override fun logVerbose(tag: String?, message: String?) { Log.v(tag ?: TAG, message ?: "") }
-        override fun logStackTraceWithMessage(tag: String?, message: String?, e: Exception?) {
-            Log.e(tag ?: TAG, message, e)
-        }
-        override fun logStackTrace(tag: String?, e: Exception?) {
-            Log.e(tag ?: TAG, "Stack trace", e)
-        }
+        override fun logError(tag: String?, message: String?) = LogProxy.error(tag, TAG, message)
+        override fun logWarn(tag: String?, message: String?) = LogProxy.warn(tag, TAG, message)
+        override fun logInfo(tag: String?, message: String?) = LogProxy.info(tag, TAG, message)
+        override fun logDebug(tag: String?, message: String?) = LogProxy.debug(tag, TAG, message)
+        override fun logVerbose(tag: String?, message: String?) = LogProxy.verbose(tag, TAG, message)
+        override fun logStackTraceWithMessage(tag: String?, message: String?, e: Exception?) =
+            LogProxy.stackTraceWithMessage(tag, TAG, message, e)
+        override fun logStackTrace(tag: String?, e: Exception?) = LogProxy.stackTrace(tag, TAG, e)
     }
 
     val viewClient = object : TerminalViewClient {
         override fun onScale(scale: Float): Float = scale
         override fun onSingleTapUp(e: MotionEvent?) {
-            terminalView?.let { view ->
-                val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE)
-                    as android.view.inputmethod.InputMethodManager
-                imm.showSoftInput(view, 0)
-            }
+            val view = viewRef?.get() ?: return
+            val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE)
+                as android.view.inputmethod.InputMethodManager
+            imm.showSoftInput(view, 0)
         }
         override fun shouldBackButtonBeMappedToEscape(): Boolean = false
         override fun shouldEnforceCharBasedInput(): Boolean = true
@@ -395,21 +335,14 @@ class TerminalViewModel @Inject constructor(
         }
 
         override fun onEmulatorSet() {}
-        override fun logError(tag: String?, message: String?) { Log.e(tag ?: TAG, message ?: "") }
-        override fun logWarn(tag: String?, message: String?) { Log.w(tag ?: TAG, message ?: "") }
-        override fun logInfo(tag: String?, message: String?) { Log.i(tag ?: TAG, message ?: "") }
-        override fun logDebug(tag: String?, message: String?) { Log.d(tag ?: TAG, message ?: "") }
-        override fun logVerbose(tag: String?, message: String?) { Log.v(tag ?: TAG, message ?: "") }
-        override fun logStackTraceWithMessage(tag: String?, message: String?, e: Exception?) {
-            Log.e(tag ?: TAG, message, e)
-        }
-        override fun logStackTrace(tag: String?, e: Exception?) {
-            Log.e(tag ?: TAG, "Stack trace", e)
-        }
-    }
-
-    fun attachView(view: TerminalView) {
-        terminalView = view
+        override fun logError(tag: String?, message: String?) = LogProxy.error(tag, TAG, message)
+        override fun logWarn(tag: String?, message: String?) = LogProxy.warn(tag, TAG, message)
+        override fun logInfo(tag: String?, message: String?) = LogProxy.info(tag, TAG, message)
+        override fun logDebug(tag: String?, message: String?) = LogProxy.debug(tag, TAG, message)
+        override fun logVerbose(tag: String?, message: String?) = LogProxy.verbose(tag, TAG, message)
+        override fun logStackTraceWithMessage(tag: String?, message: String?, e: Exception?) =
+            LogProxy.stackTraceWithMessage(tag, TAG, message, e)
+        override fun logStackTrace(tag: String?, e: Exception?) = LogProxy.stackTrace(tag, TAG, e)
     }
 
     fun createSession() {
@@ -430,20 +363,6 @@ class TerminalViewModel @Inject constructor(
     }
 
     /**
-     * Triggered by the layout listener in TerminalScreen when the view dimensions
-     * change (initial layout, keyboard open/close, rotation).
-     *
-     * Calls TerminalSession.updateSize which:
-     *   1. Resizes the local terminal emulator buffer.
-     *   2. Calls ioctl(pty_master_fd, TIOCSWINSZ) via Termux JNI.
-     *   3. The kernel sends SIGWINCH to the bridge process.
-     *   4. The bridge sends RESIZE to ctrl.sock → VM gets proper SIGWINCH.
-     */
-    fun updateSize(cols: Int, rows: Int) {
-        session?.updateSize(cols, rows)
-    }
-
-    /**
      * Compute cols/rows from view pixel dimensions + paint metrics and push
      * directly to the session, bypassing TerminalView.updateSize() which depends
      * on mRenderer being lazily initialized during the first draw. When the
@@ -452,7 +371,7 @@ class TerminalViewModel @Inject constructor(
      * into the wrong grid (visible symptom: btop draws in the top-left only,
      * because the emulator is larger than the visible viewport).
      */
-    fun forceUpdateSizeFromView(view: TerminalView) {
+    fun forceUpdateSizeFromView(view: TerminalView, typeface: Typeface = Typeface.MONOSPACE) {
         val sess = session ?: return
         val w = view.width
         val h = view.height
@@ -460,13 +379,12 @@ class TerminalViewModel @Inject constructor(
             Log.d(TAG, "forceUpdateSize: view not measured yet (${w}x${h})")
             return
         }
-        // Use the same typeface + raw pixel size as TerminalView.setTextSize(int) —
-        // which passes the int straight to Paint.setTextSize() without scaledDensity.
-        // Must use currentTypeface (not Typeface.MONOSPACE) so that custom fonts
-        // (JetBrains Mono, Fira Code, etc.) with different cell metrics produce the
-        // correct cols/rows — otherwise TUI apps render in the wrong grid area.
+        // Same typeface + raw pixel size as TerminalView.setTextSize(int) — which passes
+        // the int straight to Paint.setTextSize() without scaledDensity. Custom fonts
+        // (JetBrains Mono, Fira Code, etc.) have different cell metrics from monospace,
+        // so honor the view's actual typeface or TUI apps render in the wrong grid.
         val paint = android.graphics.Paint().apply {
-            typeface = currentTypeface
+            this.typeface = typeface
             textSize = terminalFontSize.value.toFloat()
             isAntiAlias = true
         }
@@ -550,7 +468,11 @@ class TerminalViewModel @Inject constructor(
 
     override fun onCleared() {
         super.onCleared()
-        terminalView = null
+        // Drop the proxy's pointer to this dead ViewModel — otherwise the singleton
+        // PodroidQemu keeps forwarding session events into a tombstoned client.
+        if (qemu.sessionClientDelegate === sessionClient) {
+            qemu.sessionClientDelegate = null
+        }
         attached = false
     }
 
