@@ -81,7 +81,7 @@ fi
 if [ -b /dev/zram0 ]; then
     _mem_kb=$(awk '/^MemTotal:/{print $2}' /proc/meminfo)
     echo lz4    > /sys/block/zram0/comp_algorithm 2>/dev/null || \
-    echo lzo-rle > /sys/block/zram0/comp_algorithm 2>/dev/null
+        echo lzo-rle > /sys/block/zram0/comp_algorithm 2>/dev/null
     echo $(( _mem_kb * 512 )) > /sys/block/zram0/disksize 2>/dev/null
     mkswap /dev/zram0 >/dev/null 2>&1 && swapon -p 100 /dev/zram0 2>/dev/null
 fi
@@ -194,7 +194,7 @@ trap 'podman stop -a -t 5 2>/dev/null; podman network prune -f 2>/dev/null; sync
     [ -c /dev/hvc1 ] || exit 0
     while IFS= read -r _line; do
         case "$_line" in
-            RESIZE\ *) set -- $_line; stty rows "$2" cols "$3" </dev/hvc0 2>/dev/null ;;
+            RESIZE\ *) set -- $_line; stty rows "$2" cols "$3" </dev/hvc0 2>/dev/null; printf '%s %s\n' "$2" "$3" > /run/term_size 2>/dev/null ;;
         esac
     done </dev/hvc1
 ) &
@@ -202,7 +202,8 @@ trap 'podman stop -a -t 5 2>/dev/null; podman network prune -f 2>/dev/null; sync
 # ── MOTD + profile ────────────────────────────────────────────────────────────
 boot_stage "Almost ready..."
 
-_kver_s=$(uname -r | cut -d- -f1)
+_alpine=$(cat /etc/alpine-release 2>/dev/null || echo "?")
+_kver=$(uname -r | cut -d- -f1)
 _mem_mb=$(awk '/^MemTotal:/{printf "%.0f",$2/1024}' /proc/meminfo)
 _mem_free=$(awk '/^MemAvailable:/{printf "%.0f",$2/1024}' /proc/meminfo)
 _cpus=$(nproc)
@@ -210,34 +211,41 @@ _uptime=$(( $(cut -d. -f1 /proc/uptime) / 60 ))
 _disk_used=$(df -BG / 2>/dev/null | awk 'NR==2{gsub(/G/,"",$3);print $3}')
 _disk_total=$(df -BG / 2>/dev/null | awk 'NR==2{gsub(/G/,"",$2);print $2}')
 
-if [ "$SSH_ENABLED" = "1" ] && [ -n "$ANDROID_IP" ]; then
-    _ssh_block="
-┌────────────────────────────────────────────────────────────┐
-│  SSH: ssh root@${ANDROID_IP} -p 9922   pass: podroid       │
-└────────────────────────────────────────────────────────────┘"
+# Probe internet synchronously (max 2s) so the *first* MOTD already shows the
+# real status. The async-sed pattern was racing with first login → user always
+# saw "checking..." until they exited the shell once.
+if wget -q -O /dev/null --timeout=2 http://dl-cdn.alpinelinux.org/alpine/MIRRORS.txt 2>/dev/null; then
+    _net="✓ online"
 else
-    _ssh_block=""
+    _net="✗ offline"
 fi
 
-# __NET__ is replaced asynchronously once the internet check completes
-cat > /etc/motd <<MOTD
+if [ "$SSH_ENABLED" = "1" ] && [ -n "$ANDROID_IP" ]; then
+    _ssh_line="SSH: ssh root@${ANDROID_IP} -p 9922 (pass: podroid)"
+else
+    _ssh_line=""
+fi
 
- ╔══════════════════════════════════════════════════════════╗
- ║  Podroid · Alpine Linux Container Runtime                ║
- ╚══════════════════════════════════════════════════════════╝
-
- 📦  Alpine ${_kver_s}  ·  ${_cpus} CPU  ·  ${_mem_free}/${_mem_mb} MB RAM  ·  ${_disk_used}/${_disk_total} GB  ·  Up ${_uptime}m
-     Net: __NET__
-${_ssh_block}
- 🐳  podman run -it --rm alpine        # interactive shell
-     podman run -d -p 8080:80 nginx    # background service
-     podman ps -a                      # list containers
-
-MOTD
-
-{ wget -q -O /dev/null --timeout=2 http://dl-cdn.alpinelinux.org/alpine/MIRRORS.txt 2>/dev/null \
-    && sed -i 's/__NET__/✓ internet/' /etc/motd \
-    || sed -i 's/__NET__/✗ offline/'  /etc/motd; } &
+# ── MOTD box ──────────────────────────────────────────────────────────────────
+# Bash counts ${#var} as characters (not bytes) under LC_ALL=C.UTF-8, which is
+# already exported above — so multi-byte content like · / ✓ / ✗ pads correctly.
+_W=58
+_pad() {
+    local _s="$1" _p
+    _p=$((_W - ${#_s})); [ $_p -lt 0 ] && _p=0
+    printf '│ %s%*s │\n' "$_s" "$_p" ''
+}
+_BAR='────────────────────────────────────────────────────────────'
+{
+    printf '┌%s┐\n' "$_BAR"
+    _pad ""
+    _pad "Podroid · Alpine ${_alpine} · Linux ${_kver}"
+    _pad "${_cpus} CPU · ${_mem_free}/${_mem_mb} MB · ${_disk_used}/${_disk_total} GB · Up ${_uptime}m · Net: ${_net}"
+    [ -n "$_ssh_line" ] && _pad "$_ssh_line"
+    _pad "Quickstart: podman run -it --rm alpine"
+    _pad ""
+    printf '└%s┘\n' "$_BAR"
+} > /etc/motd
 
 cat > /etc/profile <<'PROF'
 export HOME=/root SHELL=/bin/bash
@@ -259,13 +267,26 @@ alias dstop='podman stop'  drm='podman rm'  drmi='podman rmi'  dstats='podman st
 
 PS1='\[\e[1;32m\]➜\[\e[0m\] \[\e[1;34m\]\w\[\e[0m\] \[\e[1;31m\]#\[\e[0m\] '
 cd /root 2>/dev/null
+
+# Auto-source the user's ~/.bashrc if present. /root is on the persistent
+# overlay upper, so this survives reboots — drop a .bashrc there to layer
+# custom aliases / PS1 / env on top of the defaults above.
+[ -r "$HOME/.bashrc" ] && . "$HOME/.bashrc"
 PROF
 
 # ── Login wrapper ─────────────────────────────────────────────────────────────
 cat > /usr/local/bin/podroid-login <<'LOGIN'
 #!/bin/bash
+# virtio-console resets winsize to 0x0 each time the line is reopened, so
+# every getty respawn (after `exit` / Ctrl-D) starts a shell that TUI apps
+# can't draw into until the next host SIGWINCH. Restore the last-known size
+# the resize daemon recorded in /run/term_size before exec'ing bash.
+if [ -r /run/term_size ]; then
+    read _r _c < /run/term_size
+    [ -n "$_r" ] && [ -n "$_c" ] && stty rows "$_r" cols "$_c" 2>/dev/null
+fi
 cat /etc/motd 2>/dev/null
-exec /usr/bin/script -q -c 'exec /bin/bash --login' /dev/null
+exec /bin/bash --login
 LOGIN
 chmod +x /usr/local/bin/podroid-login
 grep -q '^root:' /etc/passwd 2>/dev/null || \

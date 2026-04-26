@@ -272,8 +272,12 @@ class TerminalViewModel @Inject constructor(
             // 6=ctrl+shift, 7=ctrl+alt, 8=all. Used for "ESC [1;<m><final>".
             val mod = 1 + (if (shift) 1 else 0) + (if (alt) 2 else 0) + (if (ctrl) 4 else 0)
             fun arrow(final: Char): ByteArray =
-                if (mod == 1) "\u001b[$final".toByteArray()
-                else "\u001b[1;$mod$final".toByteArray()
+                if (mod == 1) {
+                    if (isDecsetSet(session?.emulator, 1)) "\u001bO$final".toByteArray()
+                    else "\u001b[$final".toByteArray()
+                } else {
+                    "\u001b[1;$mod$final".toByteArray()
+                }
 
             val bytes = when (keyCode) {
                 KeyEvent.KEYCODE_ENTER        -> byteArrayOf(13)
@@ -409,24 +413,29 @@ class TerminalViewModel @Inject constructor(
     fun sendFocusEvent(focused: Boolean) {
         val sess = session ?: return
         val emu = sess.emulator ?: return
-        if (!isFocusReportingEnabled(emu)) return
+        if (!isDecsetSet(emu, 1004)) return
         val seq = if (focused) "\u001b[I".toByteArray() else "\u001b[O".toByteArray()
         sess.write(seq, 0, seq.size)
     }
 
-    private fun isFocusReportingEnabled(emu: TerminalEmulator): Boolean = try {
-        val cls = TerminalEmulator::class.java
-        val flagsField = cls.getDeclaredField("mCurrentDecSetFlags").apply { isAccessible = true }
-        // Termux maps the public DECSET code 1004 via mapDecSetBitToInternalBit — we can't
-        // call that (package-private), so we derive the bit by setting 1004 through
-        // the public doDecSetOrReset path and observing the delta. Cheaper: invoke the
-        // package-private mapper reflectively.
-        val mapper = cls.getDeclaredMethod("mapDecSetBitToInternalBit", Int::class.javaPrimitiveType)
-            .apply { isAccessible = true }
-        val bit = mapper.invoke(null, 1004) as Int
-        val flags = flagsField.getInt(emu)
-        (flags and bit) != 0
-    } catch (_: Throwable) { false }
+    /**
+     * Check if a DECSET mode is enabled in the emulator (e.g. 1 for DECCKM,
+     * 1004 for focus reporting). Uses reflection to access private fields
+     * and mapper methods in the Termux AAR.
+     */
+    private fun isDecsetSet(emu: TerminalEmulator?, bit: Int): Boolean {
+        if (emu == null) return false
+        return try {
+            val cls = TerminalEmulator::class.java
+            val mapper = cls.getDeclaredMethod("mapDecSetBitToInternalBit", Int::class.javaPrimitiveType)
+                .apply { isAccessible = true }
+            val internalBit = mapper.invoke(null, bit) as Int
+            val flagsField = cls.getDeclaredField("mCurrentDecSetFlags")
+                .apply { isAccessible = true }
+            val flags = flagsField.getInt(emu)
+            (flags and internalBit) != 0
+        } catch (_: Throwable) { false }
+    }
 
     fun sendExtraKey(key: String) {
         when (key) {
@@ -436,12 +445,12 @@ class TerminalViewModel @Inject constructor(
         val bytes = when (key) {
             "ESC"  -> byteArrayOf(27)
             "TAB"  -> byteArrayOf(9)
-            "UP"   -> "\u001b[A".toByteArray()
-            "DOWN" -> "\u001b[B".toByteArray()
-            "LEFT" -> "\u001b[D".toByteArray()
-            "RIGHT"-> "\u001b[C".toByteArray()
-            "HOME" -> "\u001b[H".toByteArray()
-            "END"  -> "\u001b[F".toByteArray()
+            "UP"   -> if (isDecsetSet(session?.emulator, 1)) "\u001bOA".toByteArray() else "\u001b[A".toByteArray()
+            "DOWN" -> if (isDecsetSet(session?.emulator, 1)) "\u001bOB".toByteArray() else "\u001b[B".toByteArray()
+            "LEFT" -> if (isDecsetSet(session?.emulator, 1)) "\u001bOD".toByteArray() else "\u001b[D".toByteArray()
+            "RIGHT"-> if (isDecsetSet(session?.emulator, 1)) "\u001bOC".toByteArray() else "\u001b[C".toByteArray()
+            "HOME" -> if (isDecsetSet(session?.emulator, 1)) "\u001bOH".toByteArray() else "\u001b[H".toByteArray()
+            "END"  -> if (isDecsetSet(session?.emulator, 1)) "\u001bOF".toByteArray() else "\u001b[F".toByteArray()
             "PGUP" -> "\u001b[5~".toByteArray()
             "PGDN" -> "\u001b[6~".toByteArray()
             "F1"   -> "\u001bOP".toByteArray()
