@@ -1,0 +1,26 @@
+#!/bin/sh
+# Reads "RESIZE rows cols" lines from /dev/hvc1 (ctrl.sock) and applies
+# them to /dev/hvc0 via stty. The Android side's libpodroid-bridge
+# debounces SIGWINCH bursts and emits one line per stable size.
+#
+# Also writes the last-known size to /run/term_size so podroid-login
+# can restore it after each getty respawn (virtio-console resets winsize
+# to 0x0 every time the line is reopened).
+set -e
+
+# Wait for the virtio-console node to appear (timing varies)
+for _i in $(seq 1 30); do
+    [ -c /dev/hvc1 ] && break
+    sleep 1
+done
+[ -c /dev/hvc1 ] || exit 0
+
+while IFS= read -r _line; do
+    case "$_line" in
+        RESIZE\ *)
+            set -- $_line
+            stty rows "$2" cols "$3" </dev/hvc0 2>/dev/null
+            printf '%s %s\n' "$2" "$3" > /run/term_size 2>/dev/null
+            ;;
+    esac
+done </dev/hvc1

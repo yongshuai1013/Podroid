@@ -68,6 +68,8 @@ RUN printf '%s\n' \
     'CONFIG_NETFILTER_XT_TARGET_MARK=y' \
     'CONFIG_OVERLAY_FS=y' \
     'CONFIG_FUSE_FS=y' \
+    'CONFIG_EXT4_FS_SECURITY=y' \
+    'CONFIG_SQUASHFS_XATTR=y' \
     > /tmp/forced_builtin.config
 RUN cd linux-${KERNEL_VERSION} \
     && make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- defconfig \
@@ -80,7 +82,8 @@ RUN cd linux-${KERNEL_VERSION} \
                   IP_NF_TARGET_MASQUERADE IP6_NF_TARGET_MASQUERADE \
                   NETFILTER_XT_TARGET_MASQUERADE NF_NAT_MASQUERADE \
                   NFT_COMPAT NFT_MASQ NFT_NAT \
-                  VETH TUN NF_TABLES NF_NAT NETFILTER OVERLAY_FS FUSE_FS; do \
+                  VETH TUN NF_TABLES NF_NAT NETFILTER OVERLAY_FS FUSE_FS \
+                  EXT4_FS_SECURITY SQUASHFS_XATTR; do \
            grep -q "^CONFIG_${opt}=y\$" .config \
                || { echo "FATAL: CONFIG_${opt} is not =y after merge" >&2; \
                     grep "CONFIG_${opt}" .config >&2; exit 1; }; \

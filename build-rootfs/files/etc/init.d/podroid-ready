@@ -1,0 +1,22 @@
+#!/sbin/openrc-run
+description="Podroid VM ready marker (consumed by Android boot detector)"
+
+depend() {
+    need podroid-network dropbear
+    after *
+}
+
+start() {
+    # By the time we run, dropbear has started (we depend on it).
+    # Emit the boot stages PodroidQemu.detectBootStage() expects.
+    echo "Starting SSH..." > /dev/console
+    sleep 0.2
+    echo "Almost ready..." > /dev/console
+    sleep 0.3
+    echo "Ready!" > /dev/console
+    return 0
+}
+
+stop() {
+    return 0
+}

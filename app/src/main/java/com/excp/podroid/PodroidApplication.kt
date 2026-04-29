@@ -24,6 +24,7 @@ class PodroidApplication : Application() {
         copyAssetDir("qemu", filesDir)
         copyAssetIfNeeded("vmlinuz-virt", filesDir)
         copyAssetIfNeeded("initrd.img", filesDir)
+        copyAssetIfNeeded("alpine-rootfs.squashfs", filesDir)
     }
 
     /**

@@ -29,9 +29,10 @@ Podroid Unified Build Tool
 Usage: $0 [command] [options]
 
 Commands:
-  all           Build everything (Kernel, Initramfs, QEMU, Termux JNI, APK)
+  all           Build everything (Kernel, Initramfs, Rootfs, QEMU, Termux JNI, APK)
   kernel        Build custom kernel only (podroid_kernel.config + Linux source)
   initramfs     Build custom kernel + Alpine VM initramfs (vmlinuz + initrd)
+  rootfs        Build Alpine rootfs squashfs (alpine-rootfs.squashfs)
   qemu          Build QEMU + podroid-bridge
   termux        Build libtermux.so (16KB page aligned)
   apk           Build the Android APK
@@ -116,6 +117,15 @@ build_initramfs() {
     docker cp podroid-extract:/output/initrd.img "$ASSETS/initrd.img"
     docker rm podroid-extract >/dev/null
     success "Kernel + initramfs ready."
+}
+
+build_rootfs() {
+    log "Building Alpine rootfs squashfs..."
+    docker build -f "${SCRIPT_DIR}/build-rootfs/Dockerfile.rootfs" \
+        -t podroid-rootfs:latest \
+        --output type=local,dest="${ASSETS}" \
+        "${SCRIPT_DIR}/build-rootfs/"
+    success "Built ${ASSETS}/alpine-rootfs.squashfs ($(du -h "${ASSETS}/alpine-rootfs.squashfs" | cut -f1))"
 }
 
 build_qemu() {
@@ -255,6 +265,7 @@ for arg in "$@"; do [ "$arg" == "--fast" ] && FAST=true; done
 case "$1" in
     kernel)    build_kernel ;;
     initramfs) build_initramfs ;;
+    rootfs)    build_rootfs ;;
     qemu)      build_qemu ;;
     termux)    build_termux ;;
     apk)       build_apk ;;
@@ -262,6 +273,7 @@ case "$1" in
     test)      run_boot_test ;;
     all)
         build_initramfs
+        build_rootfs
         build_qemu
         build_termux
         build_apk
@@ -269,7 +281,7 @@ case "$1" in
     clean)
         log "Cleaning up..."
         ./gradlew clean
-        docker rmi podroid-builder podroid-qemu-builder 2>/dev/null || true
+        docker rmi podroid-builder podroid-qemu-builder podroid-rootfs:latest 2>/dev/null || true
         success "Cleaned."
         ;;
     *)

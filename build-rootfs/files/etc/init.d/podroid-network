@@ -1,0 +1,33 @@
+#!/sbin/openrc-run
+description="Podroid VM networking (10.0.2.15 via SLIRP)"
+
+depend() {
+    need podroid-bootstrap
+    before podroid-ready dropbear
+    provide net
+}
+
+start() {
+    ebegin "Configuring network..."
+    echo "Configuring containers..." > /dev/console
+    ip link set lo up 2>/dev/null
+    NETIF=""
+    for _i in $(seq 1 150); do
+        NETIF=$(ip -o link show 2>/dev/null | awk -F': ' '{print $2}' | \
+            grep -vE '^(lo|dummy[0-9]*|veth|podman|cni-|docker)' | head -1)
+        [ -n "$NETIF" ] && break
+        sleep 0.2
+    done
+    if [ -n "$NETIF" ]; then
+        ip link set "$NETIF" up
+        ip addr add 10.0.2.15/24 dev "$NETIF" 2>/dev/null
+        ip route add default via 10.0.2.2 dev "$NETIF" 2>/dev/null
+        echo "Network found" > /dev/console
+    else
+        eend 1 "no network interface"
+        return 1
+    fi
+    printf 'nameserver 10.0.2.3\nnameserver 8.8.8.8\nnameserver 1.1.1.1\n' \
+        > /etc/resolv.conf
+    eend 0
+}

@@ -520,6 +520,12 @@ class PodroidQemu @Inject constructor(
             args += "-drive";  args += "file=${storagePath.absolutePath},if=none,id=drive1,format=raw,cache=writeback,aio=threads"
         }
 
+        val rootfsImg = File(context.filesDir, "alpine-rootfs.squashfs")
+        if (rootfsImg.exists()) {
+            args += "-device"; args += "virtio-blk-pci,drive=drive2,num-queues=${config.cpus}"
+            args += "-drive";  args += "file=${rootfsImg.absolutePath},if=none,id=drive2,format=raw,readonly=on,cache=writeback,aio=threads"
+        }
+
         // Downloads folder sharing via virtio-9p
         val downloadsDir = android.os.Environment.getExternalStoragePublicDirectory(
             android.os.Environment.DIRECTORY_DOWNLOADS

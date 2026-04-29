@@ -1,0 +1,11 @@
+#!/bin/sh
+# Replacement login shell for hvc0 getty. Restores the terminal size
+# from /run/term_size (written by podroid-resize) before exec'ing the
+# real login binary — virtio-console resets winsize to 0x0 on every
+# getty respawn, so without this TUI apps can't render until the user
+# triggers a host-side SIGWINCH.
+if [ -r /run/term_size ]; then
+    read _r _c < /run/term_size
+    [ -n "$_r" ] && [ -n "$_c" ] && stty rows "$_r" cols "$_c" 2>/dev/null
+fi
+exec /bin/login "$@"

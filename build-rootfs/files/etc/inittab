@@ -1,0 +1,6 @@
+::sysinit:/sbin/openrc sysinit
+::sysinit:/sbin/openrc boot
+::wait:/sbin/openrc default
+
+hvc0::respawn:/sbin/getty -L -l /usr/local/bin/podroid-login hvc0 115200 vt100
+::shutdown:/sbin/openrc shutdown
