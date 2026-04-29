@@ -1,7 +1,7 @@
 # Podroid AI Context
 
 > **Last updated:** 2026-04-29
-> **Current version:** 1.1.6 (versionCode 18)
+> **Current version:** 1.1.7 (versionCode 19)
 > **Purpose:** Complete project context for AI-assisted development. Read this before touching any file.
 
 ---
@@ -626,7 +626,14 @@ Full container management screen — SSH into VM at `127.0.0.1:9922`, run `podma
 - **Terminal title → TopAppBar**: Wire `onTitleChanged()` to update app bar from OSC sequences
 - **Custom font loading**: Allow users to load their own .ttf files (GitHub issue #5)
 
+### Recently shipped (1.1.7)
+- **Zero-config Docker**: `podroid-bootstrap` bind-mounts `/var/lib/docker` to raw ext4 on every boot, sidestepping Linux's overlay-on-overlay rejection. `apk add docker; rc-service docker start; docker run` works end to end with the kernel `overlay2` driver (not the slower FUSE fallback).
+- **Zero-config LXC**: `podroid-bootstrap` pre-creates `lxcbr0` (10.0.3.1/24) and the matching MASQUERADE rule. `apk add lxc lxc-templates; lxc-create -t busybox; lxc-start` works out of the box.
+- **Complete container kernel features**: 36 forced `=y` Kconfig additions (BTRFS, IPVS, VXLAN, IPVLAN, MACVLAN, IPsec/XFRM, FTP/TFTP NAT helpers, AppArmor LSM stub, raw iptables, CFS bandwidth, etc.). Docker `check-config.sh` and `lxc-checkconfig` both report zero fixable complaints.
+- **`/proc/config.gz` shipped**: `CONFIG_IKCONFIG=y` + `CONFIG_IKCONFIG_PROC=y` so any tool that wants to introspect the running kernel config can.
+- **Terminal regression fix**: inittab now exports `TERM=xterm-256color` instead of `vt100`, restoring 256-color/mouse/italics in the in-app terminal (regressed during the OpenRC migration).
+
 ### Recently shipped (1.1.6)
-- **OpenRC migration**: Real Alpine root running OpenRC as PID 1; `apk add docker; rc-update add docker` now works and persists across reboots
+- **OpenRC migration**: Real Alpine root running OpenRC as PID 1; switch_root replaces chroot pivot
 - **Adaptive UI**: Phone-landscape and tablet layouts in setup / home / settings / terminal; chip-row selectors with horizontal fade indicators; Quick Settings dialog with left-edge vertical scrollbar
 - **Issue #17 fix**: `podman exec -it` works rootful and rootless after switch_root replaces chroot

@@ -283,6 +283,8 @@ ssh root@127.0.0.1 -p 9922                                                      
 
 ## 🗺 Roadmap
 
+- [x] Zero-config **Docker** and **LXC** (in addition to Podman) ✅ *1.1.7*
+- [x] `/proc/config.gz` shipped + complete container-kernel feature matrix ✅ *1.1.7*
 - [x] OpenRC as PID 1: `apk add docker; rc-service docker start` works and persists ✅ *1.1.6*
 - [x] Adaptive layouts for tablets and landscape phones ✅ *1.1.6*
 - [x] Issue #17: `podman exec -it` works rootful and rootless ✅ *1.1.6*
