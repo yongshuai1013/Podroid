@@ -6,13 +6,16 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Podroid is an Android app that runs a rootless Alpine Linux VM via QEMU (ARM64) to provide a Podman container runtime without root. It embeds a Termux-based VT100 terminal emulator and communicates with the VM over QEMU serial/unix sockets.
 
+The VM runs a standard Alpine 3.23 root with **OpenRC as PID 1**; system services live in `/etc/init.d/podroid-*` (bootstrap, network, ready) inside a read-only squashfs (`/dev/vdb`), and the persistent overlay (`/dev/vda`, ext4) captures user changes (`apk add ...`, `rc-update add ...`).
+
 ## Build Commands
 
 All components are coordinated by `build-all.sh`:
 
 ```bash
 ./build-all.sh kernel      # Build custom kernel only (podroid_kernel.config, ~5–10 min)
-./build-all.sh initramfs   # Build custom kernel + Alpine initramfs (~10–15 min total)
+./build-all.sh initramfs   # Build kernel + minimal initramfs (~10–15 min)
+./build-all.sh rootfs      # Build Alpine squashfs (alpine-rootfs.squashfs, ~30 s, Docker-cached)
 ./build-all.sh qemu        # Build QEMU + podroid-bridge via Docker (~30 min first time)
 ./build-all.sh termux      # Build libtermux.so via local NDK (16KB page alignment)
 ./build-all.sh apk         # Build Android APK via Gradle
@@ -52,7 +55,7 @@ PodroidQemu (boot monitor) ←→ serial.sock ←→ QEMU ←→ ttyAMA0 (boot l
 The terminal layer uses three QEMU Unix sockets, each with a single role:
 
 - **`terminal.sock`** ↔ virtio-console `/dev/hvc0` — primary terminal I/O. getty runs on hvc0; `libpodroid-bridge.so` relays it to a Termux PTY.
-- **`ctrl.sock`** ↔ virtio-console `/dev/hvc1` — resize signal channel. Bridge debounces SIGWINCH bursts (~25 per keyboard slide) and writes a single `RESIZE rows cols\n`; the resize daemon in `init-podroid` stty's hvc0.
+- **`ctrl.sock`** ↔ virtio-console `/dev/hvc1` — resize signal channel. Bridge debounces SIGWINCH bursts (~25 per keyboard slide) and writes a single `RESIZE rows cols\n`; a resize daemon (started by `podroid-bootstrap`) stty's hvc0.
 - **`serial.sock`** ↔ PL011 `/dev/ttyAMA0` — boot log sink. `PodroidQemu.monitorBootSerial` connects for the lifetime of the VM, streaming kernel + init output into `console.log` and the boot-stage detector. No bridge handoff.
 - **`qmp.sock`** — runtime control for port forwarding (`QmpClient` sends `netdev_add` / `netdev_remove`).
 
@@ -64,13 +67,20 @@ The terminal layer uses three QEMU Unix sockets, each with a single role:
 
 **`podroid-bridge.c`** — native C binary (compiled to `libpodroid-bridge.so`) that Termux runs as a subprocess. Bidirectionally relays PTY ↔ `terminal.sock`, and writes `RESIZE rows cols\n` to `ctrl.sock` after a 200 ms-debounced SIGWINCH burst (so a single keyboard-slide animation produces one shell prompt redraw, not 25).
 
-**`init-podroid`** — two-phase Alpine init script embedded as an asset. Phase 1 mounts overlayfs over `storage.img`; Phase 2 sets up cgroup v2, SLIRP networking, Podman, and Dropbear SSH, then prints the boot stage markers consumed by `PodroidQemu`.
+**`init-podroid`** — minimal initramfs bootstrap (~45 lines). Mounts persistent ext4 (`/dev/vda` → `/mnt/persist`) and read-only Alpine squashfs (`/dev/vdb` → `/mnt/lower`), stacks an overlayfs (lower=squashfs, upper=persist), and `switch_root`s into `/sbin/init` (busybox, which reads `/etc/inittab` and starts OpenRC). All system bringup (cgroup v2, SLIRP networking, devpts/shm/mqueue mounts, ZRAM, sysctl, Podman dirs) lives in three OpenRC services on the squashfs:
+- `/etc/init.d/podroid-bootstrap` — modules, cgroup v2, ZRAM, devpts/shm/mqueue, sysctl, hostname
+- `/etc/init.d/podroid-network` — eth0 up, 10.0.2.15/24, default route, /etc/resolv.conf
+- `/etc/init.d/podroid-ready` — emits the `Starting SSH...` / `Almost ready...` / `Ready!` markers consumed by `PodroidQemu.detectBootStage()`
+
+**Why not chroot?** A previous version used `chroot /mnt/overlay` to pivot into the persistent layer. That broke `podman exec -it` (issue #17): `setns(MNT)` in `crun exec` resets `fs->root`, and the exec'd process saw raw kernel paths (`/mnt/overlay/proc`) instead of `/proc`. `switch_root` reorganizes the kernel mount tree itself — no chroot indirection — so namespace forks see a clean `/`.
+
+**`build-rootfs/`** — Dockerized build of the Alpine squashfs. `Dockerfile.rootfs` fetches `alpine-minirootfs-3.23.4-aarch64.tar.gz`, runs `build-rootfs.sh` (apk-installs alpine-base + openrc + busybox-openrc + bash + podman + crun + fuse-overlayfs + iptables/ip6tables/nftables + bridge-utils + iproute2 + dropbear, sets root password to `podroid`, copies the OpenRC service files from `build-rootfs/files/etc/`, configures runlevels via direct symlinks since chroot-into-aarch64 doesn't work on x86_64), then `mksquashfs -comp gzip` (the kernel only has `CONFIG_SQUASHFS_ZLIB=y`). Result is ~41 MB at `app/src/main/assets/alpine-rootfs.squashfs`, extracted by `PodroidApplication.kt` to `filesDir` and mounted by QEMU as `/dev/vdb`.
 
 **`data/repository/`** — `SettingsRepository` (RAM, CPUs, storage size, theme, SSH toggle) and `PortForwardRepository` (persistent rules) both use Jetpack DataStore. No database.
 
 ### Asset Extraction
 
-`PodroidApplication.kt` copies `qemu/`, `vmlinuz-virt`, and `initrd.img` from APK assets to `filesDir` on startup (size-checked to skip if unchanged). All native binaries in `jniLibs/arm64-v8a/` are extracted automatically by Android.
+`PodroidApplication.kt` copies `qemu/`, `vmlinuz-virt`, `initrd.img`, and `alpine-rootfs.squashfs` from APK assets to `filesDir` on startup (size-checked to skip if unchanged). All native binaries in `jniLibs/arm64-v8a/` are extracted automatically by Android.
 
 ### Navigation
 
@@ -93,7 +103,9 @@ These are executed directly via `ProcessBuilder` / `TerminalSession`, not loaded
 - `-serial unix:serial.sock` (boot log) + a virtio-serial-pci bus carrying two virtconsoles: `terminal.sock` (org.podroid.term, hvc0) and `ctrl.sock` (org.podroid.ctrl, hvc1)
 - `-qmp unix:qmp.sock` for runtime port-forward changes
 - RAM, CPU count, and user-editable extras (`-cpu`, `-accel`, RNG, etc.) from `SettingsRepository`
-- Virtio block device backed by `storage.img` (resized on first boot to configured size)
+- **Two** virtio block devices:
+  - `/dev/vda` ← `storage.img` (writable ext4, persistent overlay upper, resized on first boot to configured size)
+  - `/dev/vdb` ← `alpine-rootfs.squashfs` (read-only, lz-stripped gzip squashfs, mounted at `/mnt/lower` and used as overlay's lowerdir)
 - SLIRP networking with runtime port forwards via `QmpClient` (`netdev_add`/`netdev_remove` over `qmp.sock`)
 
 All socket and image paths are under `context.filesDir`.
