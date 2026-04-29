@@ -22,10 +22,9 @@ What you expected to happen.
 What actually happened instead.
 
 ## Diagnostic Log
-**Required** — Attach the log export from:
-`Settings → Diagnostics → Export Log`
+**Required.** Attach the log export from `Settings → Diagnostics → Export Log`.
 
-This already includes: app version, device info (model/Android), settings, and full logcat.
+The export already includes: app version, device info (model / Android version), settings, and full logcat.
 
 ## Reproduction Sample
 If this is about the VM, include terminal output from running:

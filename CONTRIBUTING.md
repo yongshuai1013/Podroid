@@ -1,57 +1,99 @@
 # Contributing to Podroid
 
-Contributions are welcome! Whether it's a bug report, feature idea, or code change — all help is appreciated.
+Thanks for considering a contribution. Bug reports, feature requests, and pull requests are all welcome.
 
-## Getting Started
+Before you start, please skim [`skill.md`](skill.md). It documents the boot pipeline, every native binary, and the design quirks you need to know to make changes that don't regress.
 
-1. Clone the repo:
-   ```sh
-   git clone https://github.com/ExTV/Podroid.git
-   cd Podroid
-   ```
+## Getting started
 
-2. Build the initramfs (requires Docker with multi-arch support):
-   ```sh
-   ./docker-build-initramfs.sh
-   ```
+```sh
+git clone https://github.com/ExTV/Podroid.git
+cd Podroid
+```
 
-3. Open in Android Studio and build, or from the command line:
-   ```sh
-   ./gradlew assembleDebug
-   adb install -r app/build/outputs/apk/debug/app-debug.apk
-   ```
+You will need:
 
-You need an **arm64 Android device** running **Android 14+** to test.
+- **Docker 20.10+** for the kernel, initramfs, rootfs, and QEMU build pipelines
+- **Android NDK r27c** for the bridge and Termux native libraries
+- **Android SDK** with platform 36 + build-tools
+- An **arm64 Android device** running **Android 9.0+ (API 28)** for testing
 
-## Reporting Bugs
+## Build pipeline
 
-Open an [issue](https://github.com/ExTV/Podroid/issues) with:
-- Steps to reproduce
-- What you expected vs what happened
-- Device model and Android version
-- Relevant logcat output (`adb logcat --pid=$(adb shell pidof com.excp.podroid.debug)`)
+`build-all.sh` orchestrates every component:
 
-## Submitting Changes
+```sh
+./build-all.sh kernel       # custom Linux 6.6.87 (~5–10 min, Docker-cached)
+./build-all.sh initramfs    # kernel + minimal initramfs
+./build-all.sh rootfs       # Alpine 3.23 squashfs (~30 s, Docker-cached)
+./build-all.sh qemu         # QEMU 11 + podroid-bridge (~30 min first run)
+./build-all.sh termux       # libtermux.so via local NDK
+./gradlew installDebug      # build + install the APK
+```
 
-1. Fork the repo and create a branch (`fix/your-bug` or `feature/your-feature`)
-2. Keep PRs focused — one fix or feature per PR
-3. Test on a real device before submitting
-4. Update the README if your change affects user-facing behavior
+Or, for the common case where you only changed Kotlin / UI code:
 
-## Project Structure
+```sh
+./gradlew installDebug
+```
 
-- `init-podroid` — VM init script (Alpine Linux boot, overlay setup, getty)
-- `Dockerfile` / `docker-build-initramfs.sh` — initramfs build pipeline
-- `app/src/main/java/com/excp/podroid/engine/` — QEMU lifecycle, QMP client, VM state
-- `app/src/main/java/com/excp/podroid/service/` — Android foreground service
-- `app/src/main/java/com/excp/podroid/ui/` — Jetpack Compose UI (Home, Terminal, Settings)
-- `app/src/main/jniLibs/` — Pre-built QEMU and libslirp binaries
+To validate a full rebuild end-to-end:
 
-## Code Style
+```sh
+./build-all.sh test         # deploys APK, polls console.log for "Ready!"
+```
 
-- Follow standard [Kotlin conventions](https://kotlinlang.org/docs/coding-conventions.html)
-- Keep it simple — no unnecessary abstractions or premature optimization
-- Match the existing style of the file you're editing
+## Reporting bugs
+
+Please open an issue using the **Bug Report** template. The most useful single thing you can attach is the diagnostic log:
+
+`Settings → Diagnostics → Export Log`
+
+It bundles app version, device model + Android version, settings, and full logcat in one file. If the bug is VM-side, also include the VM console:
+
+```sh
+adb shell run-as com.excp.podroid.debug cat files/console.log
+```
+
+## Submitting changes
+
+1. Fork the repository and create a topic branch (`fix/issue-42`, `feature/whatever`).
+2. Keep pull requests focused: one fix or one feature per PR.
+3. Test on a real arm64 device before submitting. Emulators do not exercise the QEMU + native binary path the way real hardware does.
+4. If your change is user-facing, update [`README.md`](README.md). If it changes the boot pipeline, terminal layer, or kernel options, update [`skill.md`](skill.md) and [`CLAUDE.md`](CLAUDE.md) too.
+5. Match the existing code style of the file you are editing.
+
+## Project layout
+
+```
+Podroid/
+├── app/                                  Android application (Jetpack Compose, Hilt)
+│   └── src/main/
+│       ├── java/com/excp/podroid/
+│       │   ├── engine/                   PodroidQemu, QmpClient, VmState
+│       │   ├── service/                  Foreground service + boot-stage notification
+│       │   ├── data/repository/          DataStore-backed settings & port forwards
+│       │   └── ui/                       Compose screens + theme
+│       ├── jniLibs/arm64-v8a/            QEMU, podroid-bridge, libslirp, libtermux
+│       └── assets/                       kernel, initramfs, squashfs, fonts, themes
+├── init-podroid                          Minimal initramfs script (~45 lines)
+├── podroid-bridge.c                      Native PTY ↔ virtio-console relay
+├── Dockerfile                            Kernel + initramfs + QEMU build pipeline
+├── build-rootfs/                         Alpine squashfs build pipeline
+│   ├── Dockerfile.rootfs
+│   ├── build-rootfs.sh
+│   └── files/                            OpenRC services baked into the squashfs
+├── build-all.sh                          Unified build / deploy script
+├── podroid_kernel.config                 Custom kernel Kconfig fragment
+└── docs/                                 GitHub Pages site
+```
+
+## Code style
+
+- Kotlin: follow the [official conventions](https://kotlinlang.org/docs/coding-conventions.html).
+- Keep it simple. No premature abstractions.
+- Match the surrounding file's style. Consistency beats personal preference.
+- Comments explain *why*, not *what*. Self-documenting names go further than prose.
 
 ## License
 

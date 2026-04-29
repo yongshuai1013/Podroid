@@ -1,117 +1,144 @@
 # Credits & Acknowledgements
 
-Podroid is built upon the work of many talented open source developers and communities.
-We are deeply grateful to everyone listed here.
+Podroid stands on the shoulders of an enormous amount of open-source work. The list below covers the upstream projects whose code, designs, fonts, or themes are shipped inside the APK, along with the major Android-side dependencies. Every component remains under its own upstream license; see [LICENSE](LICENSE) for Podroid's own license (GPL v2.0).
+
+If something you maintain is included here and we missed you, please open an issue or a pull request and we will fix it.
 
 ---
 
-## Core Engine: QEMU
+## Virtual machine stack
 
-**QEMU** is the heart of Podroid. It provides the machine emulation and virtualization.
+These projects make up the actual Linux system that runs inside Podroid.
 
-- **Original Author:** Fabrice Bellard
-- **Website:** https://www.qemu.org
-- **Repository:** https://gitlab.com/qemu-project/qemu
-- **License:** GNU General Public License v2.0 (and later)
-- **Copyright:** The QEMU Project developers
+### Linux kernel
+Podroid ships a custom build of the upstream Linux kernel (currently 6.6.87) configured specifically for OCI-compatible containers under QEMU TCG.
 
-Notable QEMU contributors whose work this project relies on:
-- Fabrice Bellard — original author
-- The QEMU community — https://www.qemu.org/contributors/
+- Project: https://kernel.org
+- License: GNU General Public License v2.0
+- Maintainers: Linus Torvalds and the Linux kernel community
 
----
+### Alpine Linux
+The guest userspace is a slightly customized Alpine Linux 3.23 root filesystem.
 
-## Android Integration Foundation: Limbo PC Emulator
+- Project: https://alpinelinux.org
+- License: per-package (see Alpine's individual package licenses)
 
-**Limbo** pioneered running QEMU on Android and solved countless platform-specific challenges
-that Podroid builds upon. Much of the JNI layer, SDL integration, and Android lifecycle
-management in this project is derived from Limbo's work.
+### Container runtime
+The full rootless OCI stack ships pre-installed and pre-configured.
 
-- **Author:** Max Kastanas (max2idea)
-- **Repository:** https://github.com/limboemu/limbo
-- **License:** GNU General Public License v2.0
-- **Copyright:** Copyright (C) Max Kastanas 2012 and Limbo contributors
+| Component       | Role                                     | Project                                              |
+| --------------- | ---------------------------------------- | ---------------------------------------------------- |
+| **Podman**      | Daemonless container engine              | https://podman.io                                    |
+| **crun**        | Fast, low-memory OCI runtime             | https://github.com/containers/crun                   |
+| **netavark**    | Container network configuration tool     | https://github.com/containers/netavark               |
+| **aardvark-dns**| DNS resolver for netavark networks       | https://github.com/containers/aardvark-dns           |
+| **fuse-overlayfs** | Rootless overlay filesystem driver    | https://github.com/containers/fuse-overlayfs         |
+| **slirp4netns** | Rootless user-mode networking            | https://github.com/rootless-containers/slirp4netns   |
+| **shadow-utils**| `newuidmap` / `newgidmap` for rootless   | https://github.com/shadow-maint/shadow               |
 
-Limbo contributors whose work influenced this project:
-- Max Kastanas — principal developer
-- All contributors at https://github.com/limboemu/limbo/graphs/contributors
+All maintained by the containers community; primarily Apache-2.0 / GPL-2.0 licensed.
 
----
-
-## SDL2 (Simple DirectMedia Layer)
-
-SDL2 is used as the graphics/input backend.
-
-- **Author:** Sam Lantinga and SDL contributors
-- **Website:** https://libsdl.org
-- **License:** zlib License
-- **Copyright:** Copyright (C) 1997-2024 Sam Lantinga
+### System & init
+- **busybox**: multi-call binary providing the initramfs userland and `/sbin/init` (https://busybox.net, GPL-2.0)
+- **OpenRC**: service manager running as PID 1 inside the VM (https://github.com/OpenRC/openrc, BSD-2-Clause)
+- **Dropbear SSH**: small SSH server (https://matt.ucc.asn.au/dropbear/dropbear.html, MIT-style)
+- **iproute2, iptables, nftables, bridge-utils**: networking utilities maintained by netfilter.org and the Linux community
 
 ---
 
-## musl libc
+## Emulation
 
-musl is a lightweight C standard library used for Android compatibility shims.
+### QEMU
+QEMU provides the machine emulation that makes everything else possible. Podroid currently builds against QEMU 11.0.0-rc2, cross-compiled for arm64 Android.
 
-- **Author:** Rich Felker and musl contributors
-- **Website:** https://musl.libc.org
-- **License:** MIT License
-- **Copyright:** Copyright © 2005-2020 Rich Felker, et al.
+- Project: https://www.qemu.org
+- Repository: https://gitlab.com/qemu-project/qemu
+- License: GNU General Public License v2.0 (and later)
+- Original author: Fabrice Bellard
+- Contributors: https://www.qemu.org/contributors/
+
+### libslirp
+SLIRP is QEMU's user-mode network stack. Podroid links it into the QEMU binary statically.
+
+- Project: https://gitlab.freedesktop.org/slirp/libslirp
+- License: BSD-3-Clause
+
+### libucontext
+Bionic does not implement the System V `ucontext.h` API, which QEMU coroutines depend on. Podroid links against Ariadne Conill's portable libucontext to fill the gap.
+
+- Project: https://github.com/kaniini/libucontext
+- License: ISC
+
+### Limbo PC Emulator
+Limbo pioneered running QEMU on Android years ago and solved many of the platform-specific issues we no longer have to. Although Podroid is a fresh codebase with a different UI and pipeline, the lineage of "QEMU on Android" traces back to Max Kastanas's work.
+
+- Repository: https://github.com/limboemu/limbo
+- License: GNU General Public License v2.0
+- Author: Max Kastanas (max2idea)
 
 ---
 
-## Android Jetpack
+## Terminal & UI
 
-Podroid uses the following AndroidX / Jetpack libraries:
+### Termux Terminal Emulator
+The terminal layer (xterm-256color emulator, escape-sequence parsing, mouse tracking, color theme parsing) is the Termux project's `terminal-view` and `terminal-emulator` libraries, consumed via JitPack as `com.github.termux:terminal-view:0.118.1`. Podroid rebuilds `libtermux.so` locally for 16 KB page alignment.
 
-| Library | Copyright |
-|---------|-----------|
-| Jetpack Compose | Copyright (C) Google LLC |
-| Room | Copyright (C) Google LLC |
-| Navigation Compose | Copyright (C) Google LLC |
-| ViewModel / Lifecycle | Copyright (C) Google LLC |
-| DataStore | Copyright (C) Google LLC |
-| Hilt (Dagger) | Copyright (C) Google LLC / The Dagger Authors |
+- Project: https://github.com/termux/termux-app
+- License: GNU General Public License v3.0
+- Maintainers: Fredrik Fornwall and the Termux community
 
-All licensed under the Apache License 2.0.
-See https://source.android.com/setup/start/licenses
+### Color themes
+Podroid ships 122 terminal color schemes covering most of the popular ecosystem (Dracula, Nord, Solarized, Tokyo Night, Catppuccin, Gruvbox, Monokai, the base16 family, and more). The themes are sourced from the [**Gogh**](https://github.com/Gogh-Co/Gogh) project's curated collection (MIT). Individual color palette designers are credited within each `.properties` file.
+
+### Bundled fonts
+
+| Font                                                                                | License             |
+| ----------------------------------------------------------------------------------- | ------------------- |
+| [JetBrains Mono](https://www.jetbrains.com/mono/)                                   | OFL-1.1             |
+| [Fira Code](https://github.com/tonsky/FiraCode)                                     | OFL-1.1             |
+| [Cascadia Code](https://github.com/microsoft/cascadia-code)                         | OFL-1.1             |
+| [Source Code Pro](https://github.com/adobe-fonts/source-code-pro)                   | OFL-1.1             |
+| [Hack](https://github.com/source-foundry/Hack)                                      | MIT + Bitstream     |
+| [Iosevka](https://github.com/be5invis/Iosevka)                                      | OFL-1.1             |
+| [Victor Mono](https://github.com/rubjo/victor-mono)                                 | OFL-1.1             |
+| [Monofur](https://www.fontsquirrel.com/fonts/monofur)                               | Free for personal & commercial use |
+| [Anonymous Pro](https://www.marksimonson.com/fonts/view/anonymous-pro)              | OFL-1.1             |
+| [DejaVu Sans Mono](https://dejavu-fonts.github.io/)                                 | DejaVu / Bitstream Vera |
+| [Liberation Mono](https://github.com/liberationfonts/liberation-fonts)              | OFL-1.1             |
+| [Ubuntu Mono](https://design.ubuntu.com/font/)                                      | UFL-1.0             |
+| [Terminus](https://terminus-font.sourceforge.net/)                                  | OFL-1.1             |
 
 ---
 
-## Kotlin
+## Android application
 
-The application is written in **Kotlin**.
+### Language & libraries
+- **Kotlin** by JetBrains s.r.o. (https://kotlinlang.org, Apache-2.0)
+- **Jetpack Compose** by Google LLC (Apache-2.0)
+- **AndroidX** (Lifecycle, Navigation, DataStore, ViewModel, Activity Compose) by Google LLC (Apache-2.0)
+- **Hilt / Dagger** by Google LLC and the Dagger Authors (Apache-2.0)
+- **Material 3** by Google LLC (Apache-2.0)
+- **kotlinx.coroutines** by JetBrains (Apache-2.0)
 
-- **Developer:** JetBrains s.r.o.
-- **Website:** https://kotlinlang.org
-- **License:** Apache License 2.0
+### Build toolchain
+- **Android Gradle Plugin, Android SDK, Android NDK r27c** by Google LLC
+- **Gradle** by Gradle, Inc. (Apache-2.0)
+- **Docker** for the cross-build pipelines used by the kernel, initramfs, rootfs, and QEMU stages
 
 ---
 
 ## Podroid
 
-Podroid itself is developed by **excp** and contributors.
+Podroid itself is developed by **[ExTV](https://github.com/ExTV)** and contributors.
 
-- **Repository:** https://github.com/ExTV/Podroid
-- **License:** GNU General Public License v2.0 (or later)
+- Repository: https://github.com/ExTV/Podroid
+- Website: https://extv.github.io/Podroid/
+- License: GNU General Public License v2.0 (or later)
 
-If you have contributed to Podroid and are not listed here, please open an issue or pull
-request to have your name added.
-
----
-
-## How to Attribute
-
-If you distribute a modified version of Podroid, you must:
-
-1. Retain this CREDITS.md and all upstream license notices
-2. Credit the original QEMU and Limbo projects
-3. Make your modifications available under GPL v2.0 or later
-4. Clearly indicate that your version is modified
+If you have contributed code, themes, fonts, or bug reports and would like to be listed here, please open an issue or a pull request.
 
 ---
 
-## Reporting Missing Credits
+## Reporting missing or incorrect attribution
 
-If you believe your work is used in Podroid but not properly credited, please open an issue
-at the project repository. We take attribution seriously.
+We take attribution seriously. If you believe your work is shipped in Podroid but not properly credited, or if any information above is incorrect, please [open an issue](https://github.com/ExTV/Podroid/issues/new) and we will get it fixed quickly.
