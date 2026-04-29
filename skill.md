@@ -1,7 +1,7 @@
 # Podroid AI Context
 
-> **Last updated:** 2026-04-25
-> **Current version:** 1.1.5 (versionCode 17)
+> **Last updated:** 2026-04-29
+> **Current version:** 1.1.6 (versionCode 18)
 > **Purpose:** Complete project context for AI-assisted development. Read this before touching any file.
 
 ---
@@ -30,8 +30,8 @@
 | Terminal | Termux TerminalView v0.118.1 (JitPack AAR) |
 | VM | QEMU 11.0.0-rc2 TCG (no KVM) |
 | Container Runtime | Podman + crun + netavark + slirp4netns |
-| VM Init | Custom two-phase shell script (`init-podroid`) |
-| VM Linux | Alpine Linux 3.23 aarch64 |
+| VM Init | Minimal initramfs (`init-podroid`, ~45 lines) + OpenRC PID 1 |
+| VM System | Standard Alpine 3.23 squashfs + ext4 overlay (persistent) |
 
 ---
 
@@ -40,10 +40,12 @@
 ### High-Level Flow
 ```
 Android App
-├── PodroidApplication — extracts assets (vmlinuz, initrd, qemu/) on first run (size-checked to skip if unchanged)
+├── PodroidApplication — extracts assets (vmlinuz, initrd, alpine-rootfs.squashfs, qemu/) on first run (size-checked)
 ├── PodroidService (foreground) — hosts QEMU, holds WakeLock, updates notification with boot stages
 ├── PodroidQemu (singleton)
 │   ├── QEMU process (libqemu-system-aarch64.so — ELF binary renamed .so for APK)
+│   ├── /dev/vda        — storage.img (writable ext4, persistent overlay upper, resized on first boot)
+│   ├── /dev/vdb        — alpine-rootfs.squashfs (read-only, gzip squashfs, overlay lower)
 │   ├── serial.sock     — ttyAMA0 boot-log sink; monitor stays connected for VM lifetime
 │   ├── terminal.sock   — virtio-console hvc0; primary shell I/O for podroid-bridge
 │   ├── ctrl.sock       — virtio-console hvc1; debounced RESIZE messages from bridge
@@ -54,12 +56,17 @@ Android App
 
 ### VM Boot Sequence
 1. QEMU starts and binds all four sockets (`server,nowait` so it doesn't block on a connection).
-2. **Boot monitor** (`PodroidQemu.monitorBootSerial`) connects to `serial.sock` and streams everything kernel and init-podroid write to ttyAMA0 into `console.log` + the in-memory tail used by `detectBootStage`. Stays connected for the lifetime of the VM (no hand-off).
-3. `init-podroid` Phase 1 (initramfs): mounts virtio-blk as ext4, creates overlayfs (`lowerdir=/`, `upperdir=/mnt/persist/upper`), pivots via `/bin/busybox chroot /mnt/overlay /init --main`.
-4. `init-podroid` Phase 2 (`--main`): kernel modules (just `9p*` now — bridge / netfilter / overlay / fuse / virtio are all built-in) → networking → containers → SSH → starts getty on `/dev/hvc0`. Resize daemon listens on `/dev/hvc1`.
-5. Phase 2 emits `boot_stage "Ready!"` immediately before launching the getty loop — no `sleep 2` is needed any more because the bridge connects to a different socket.
-6. `detectBootStage("Ready!")` fires → `_state = Running` → `autoStartBridge()` posts to the main thread.
-7. `TerminalSession` launches `libpodroid-bridge.so` with `terminal.sock` + `ctrl.sock` as args. Bridge connects directly; no socket hand-off, no 500 ms guard delay.
+2. **Boot monitor** (`PodroidQemu.monitorBootSerial`) connects to `serial.sock` and streams everything kernel + init + OpenRC writes to ttyAMA0 into `console.log` + the in-memory rolling buffer used by `detectBootStage`. Stays connected for the lifetime of the VM (no hand-off).
+3. `init-podroid` (initramfs, ~45 lines): mounts `/dev/vda` (ext4, mkfs if needed) at `/mnt/persist`, mounts `/dev/vdb` (squashfs) at `/mnt/lower`, stacks `overlay -o lowerdir=/mnt/lower,upperdir=/mnt/persist/upper,workdir=/mnt/persist/work` at `/mnt/overlay`, `mount --move`s the lower/persist into the new root, then `switch_root /mnt/overlay /sbin/init` (busybox init).
+4. `/sbin/init` reads `/etc/inittab` and starts OpenRC. Runlevels are pre-symlinked at build time (`/etc/runlevels/default/{podroid-bootstrap,podroid-network,podroid-resize,dropbear,podroid-ready}`).
+5. **podroid-bootstrap** (OpenRC service on squashfs): cgroup v2, devpts/shm/mqueue, sysctl, ZRAM, `mount --make-rshared /`, chmod 0666 /dev/{net/tun,fuse}, hostname.
+6. **podroid-network**: `ip link set eth0 up`, assign 10.0.2.15/24, default route 10.0.2.2, write `/etc/resolv.conf` (8.8.8.8, 1.1.1.1).
+7. **podroid-ready**: emits `Starting SSH...`, `Almost ready...`, `Ready!` markers consumed by `detectBootStage()`.
+8. `detectBootStage("Ready!")` fires → `_state = Running` → `autoStartBridge()` posts to the main thread.
+9. `TerminalSession` launches `libpodroid-bridge.so` with `terminal.sock` + `ctrl.sock`. Bridge connects directly to virtio-console hvc0 (which getty owns via `podroid-login`).
+
+### Why switch_root and not chroot
+The old init-podroid did `chroot /mnt/overlay`. Inside `crun exec`, `setns(CLONE_NEWNS)` resets `fs->root` — so namespace forks saw raw kernel paths (`/mnt/overlay/proc` instead of `/proc`), which is the root cause of issue #17 (`podman exec -it` failing with `crun: open /dev/ptmx: No such device`). `switch_root` reorganizes the kernel mount tree itself, so subsequent namespace operations land on a clean `/`.
 
 ### No socket hand-off
 The old PL011 path used a single-client `serial.sock` shared by the boot monitor and the bridge, which forced a `releaseSerial()` + delay dance. With the virtio-console split that constraint is gone. `releaseSerial()` only runs during `cleanup()` on VM stop now.
@@ -77,8 +84,9 @@ All tuning applies under software emulation only — KVM is impossible without r
 - `mitigations=off` in guest kernel cmdline — safe inside TCG VM (speculative execution attacks can't cross the emulated ISA boundary); 5–15% CPU gain.
 - `elevator=mq-deadline` in guest kernel cmdline — request merging for virtio-blk random writes (Podman overlay graph driver).
 
-**In `init-podroid`:**
+**In `podroid-bootstrap` (OpenRC service):**
 - ZRAM swap at half physical RAM using lz4 — gives 1.5–2× effective memory with near-zero I/O cost; swapon at priority 100 so it's preferred over any file swap.
+- `CONFIG_EXT4_FS_SECURITY=y` and `CONFIG_SQUASHFS_XATTR=y` are required so `security.capability` xattrs survive the overlay — without them `newuidmap`/`newgidmap` lose their `cap_setuid+ep` / `cap_setgid+ep` capabilities and rootless podman fails.
 
 **In `Dockerfile` (QEMU build):**
 - Currently `-fPIC -DANDROID` only (no LTO / -O3) — those previously caused link failures with QEMU 11.0.0-rc2 + NDK r27c. Three minimum patches make the build clean: `--disable-plugins`, empty `contrib/ivshmem-{server,client}/meson.build` stubs, and an `-include shm_shim.h` + `libshm.a` (memfd_create-backed) to satisfy `shm_open`/`shm_unlink`.
@@ -91,11 +99,18 @@ All tuning applies under software emulation only — KVM is impossible without r
 ```
 /
 ├── app/                            # Android application module
-├── init-podroid                    # VM init script (baked into initrd.img as /init)
+├── init-podroid                    # Minimal initramfs script (~45 lines) — mounts overlay, switch_root
 ├── podroid-bridge.c                # Native PTY↔virtio-console relay (compiled to libpodroid-bridge.so)
-├── Dockerfile                      # Unified multi-stage: downloader → rootfs-builder → packer → qemu-builder → final
-├── build-all.sh                    # Unified build+deploy script
-├── gradle.properties               # podroidQemuVersion=11.0.0-rc2
+├── Dockerfile                      # Kernel + initramfs + QEMU multi-stage build
+├── build-rootfs/                   # Separate Docker pipeline for the Alpine squashfs
+│   ├── Dockerfile.rootfs           # apk-installs Alpine, mksquashfs -comp gzip
+│   ├── build-rootfs.sh             # apk install list, doas/sudo wheel rules, file caps, runlevel symlinks
+│   └── files/                      # OpenRC services + helpers baked into the squashfs
+│       ├── etc/init.d/podroid-{bootstrap,network,resize,ready}
+│       ├── etc/{inittab,rc.conf,conf.d/podroid}
+│       └── usr/local/bin/podroid-{login,resize}
+├── build-all.sh                    # Unified build+deploy script (kernel/initramfs/rootfs/qemu/termux/apk)
+├── gradle.properties               # podroidQemuVersion=11.0.0-rc2, podroidKernelVersion
 ├── build.gradle.kts, settings.gradle.kts
 └── gradle/, gradlew
 ```
@@ -163,8 +178,9 @@ All tuning applies under software emulation only — KVM is impossible without r
 
 ### Assets (app/src/main/assets/)
 ```
-├── vmlinuz-virt                    # Linux kernel (MUST match modules in initrd.img — same rootfs-builder stage)
-├── initrd.img                      # Alpine initramfs (~71MB compressed)
+├── vmlinuz-virt                    # Custom Linux 6.6.87 kernel (built by Dockerfile)
+├── initrd.img                      # Minimal initramfs (only needs to mount overlay + switch_root)
+├── alpine-rootfs.squashfs          # ~41 MB Alpine 3.23 squashfs (built by build-rootfs/) — mounted as /dev/vdb
 ├── qemu/
 │   ├── efi-virtio.rom
 │   └── keymaps/
@@ -172,6 +188,8 @@ All tuning applies under software emulation only — KVM is impossible without r
 └── fonts/                          # 13 terminal fonts (.ttf)
     └── JetBrains-Mono.ttf, Fira-Code.ttf, CascadiaCode.ttf, etc.
 ```
+
+All three large blobs (vmlinuz-virt, initrd.img, alpine-rootfs.squashfs) are gitignored — built locally and extracted from APK assets into `filesDir` on first run by `PodroidApplication.copyAssetIfNeeded()`.
 
 ### Native Libs (app/src/main/jniLibs/arm64-v8a/)
 
@@ -194,7 +212,8 @@ All tuning applies under software emulation only — KVM is impossible without r
 | QEMU binary | `libqemu-system-aarch64.so` in `nativeLibraryDir` |
 | Kernel | `filesDir/vmlinuz-virt` |
 | Initrd | `filesDir/initrd.img` |
-| Storage image | `filesDir/storage.img` (ext4, sparse) |
+| Storage image | `filesDir/storage.img` (ext4, sparse, /dev/vda — overlay upper) |
+| Rootfs squashfs | `filesDir/alpine-rootfs.squashfs` (read-only, /dev/vdb — overlay lower) |
 | serial.sock | `filesDir/serial.sock` — ttyAMA0, boot-log only; monitor stays connected for VM lifetime |
 | terminal.sock | `filesDir/terminal.sock` — virtio-console hvc0; primary terminal for podroid-bridge |
 | ctrl.sock | `filesDir/ctrl.sock` — virtio-console hvc1; bridge writes debounced `RESIZE rows cols\n` |
@@ -212,76 +231,72 @@ All tuning applies under software emulation only — KVM is impossible without r
 
 ---
 
-## Boot Stage Strings (init-podroid → detectBootStage)
+## Boot Stage Strings (OpenRC services → detectBootStage)
 
-These exact strings are emitted by `init-podroid` and matched by `PodroidQemu.detectBootStage()`:
+These exact strings are emitted by the boot pipeline and matched by `PodroidQemu.detectBootStage()`:
 
-| String in serial output | Android UI label |
-|------------------------|-----------------|
-| `Initializing system...` | (no UI change — first phase 2 line) |
-| `Loading kernel modules...` | "Loading kernel modules..." |
-| `Waiting for network...` | (no match — intermediate) |
-| `Network found` | "Network found" |
-| `Configuring containers...` | "Configuring containers..." |
-| `Starting SSH...` | "Starting SSH..." |
-| `Almost ready...` | "Almost ready..." |
-| `Ready!` | "Ready" → state = Running → autoStartBridge() |
+| String in serial output | Source | Android UI label |
+|------------------------|--------|-----------------|
+| `Mounting storage...` | PodroidQemu (pre-launch) | "Mounting storage..." |
+| `Booting kernel...` | PodroidQemu (pre-launch) | "Booting kernel..." |
+| `Starting SSH...` | `podroid-ready` | "Starting SSH..." |
+| `Almost ready...` | `podroid-ready` | "Almost ready..." |
+| `Ready!` | `podroid-ready` | "Ready" → state = Running → autoStartBridge() |
 
-Also detected: `Mounting storage...`, `Booting kernel...` (emitted by PodroidQemu itself, not init-podroid).
-
-No `sleep 2` after `Ready!` is needed any more — the boot monitor stays on `serial.sock` while the bridge connects to a separate `terminal.sock`, so there's no socket hand-off race to guard.
+The earlier intermediate stages (`Initializing system...`, `Loading kernel modules...`, `Network found`, `Configuring containers...`) were tied to the old monolithic init-podroid; with OpenRC, the relevant init steps are short enough that only the SSH / Almost ready / Ready trio matters for UI feedback.
 
 ---
 
-## init-podroid Structure
+## init-podroid Structure (post-OpenRC migration)
 
-### Phase 1 (runs in initramfs as PID 1)
-```bash
-# Located AFTER the `if [ "$1" = "--main" ]; then ... fi` block (at end of file)
-mount proc/sys/dev
-# virtio_blk is built-in to the custom kernel (no need to modprobe).
-find /dev/vda or /dev/vdb → PERSIST_DEV
-mount -t ext4 PERSIST_DEV /mnt/persist  # mkfs.ext4 if needed
+The initramfs script is now ~45 lines and does the absolute minimum: mount overlay, switch_root.
+
+```sh
+#!/bin/sh
+mount -t proc proc /proc
+mount -t sysfs sys /sys
+mount -t devtmpfs dev /dev
+
+# /dev/vda = persistent ext4 (writable upper); /dev/vdb = squashfs (read-only lower)
+PERSIST=/dev/vda
+LOWER=/dev/vdb
+
+# mkfs.ext4 on first boot if vda is blank, then mount
+mount -t ext4 $PERSIST /mnt/persist || (mkfs.ext4 -F $PERSIST && mount -t ext4 $PERSIST /mnt/persist)
+mount -t squashfs -o ro $LOWER /mnt/lower
+
 mkdir -p /mnt/persist/upper /mnt/persist/work /mnt/overlay
-mount -t overlay overlay -o lowerdir=/,upperdir=...,workdir=... /mnt/overlay
-exec /bin/busybox chroot /mnt/overlay /init --main
-# FALLBACK (if overlay failed): exec /init --main  ← runs without persistence
+mount -t overlay overlay \
+  -o lowerdir=/mnt/lower,upperdir=/mnt/persist/upper,workdir=/mnt/persist/work \
+  /mnt/overlay
+
+# Move lower + persist into the new root tree so OpenRC services can see them
+mkdir -p /mnt/overlay/mnt/lower /mnt/overlay/mnt/persist
+mount --move /mnt/lower   /mnt/overlay/mnt/lower
+mount --move /mnt/persist /mnt/overlay/mnt/persist
+
+exec switch_root /mnt/overlay /sbin/init
 ```
 
-**Critical bug to avoid**: the chroot must use `/bin/busybox chroot` explicitly. Phase 1 runs before busybox applet symlinks are installed, so a bare `chroot` is not in PATH and the script exits with code 127, which the kernel interprets as init dying → panic on every boot.
+After `switch_root`, busybox `/sbin/init` reads `/etc/inittab` and starts OpenRC. The squashfs ships pre-symlinked runlevels, so no chroot-into-aarch64 was needed at build time.
 
-### Phase 2 (`--main` flag, runs inside chroot overlay)
-```bash
-boot_stage "Initializing system..."
-# mount proc/sys/devtmpfs/devpts/tmpfs/cgroup2
-boot_stage "Loading kernel modules..."
-# Most networking/fs is =y in our custom kernel; only 9p* are still =m.
-boot_stage "Waiting for network..."
-# wait for eth0 with IP (loop), set up resolv.conf (10.0.2.3, 8.8.8.8, 1.1.1.1)
-boot_stage "Network found"
-boot_stage "Configuring containers..."
-# sysctl, /etc/subuid, containers.conf, storage.conf, registries.conf
-boot_stage "Starting SSH..."  # only if ssh=1 in kernel cmdline
-# dropbearkey + dropbear
-boot_stage "Almost ready..."
-# MOTD generation with async internet check, bash profile + aliases
-# resize daemon (background): reads RESIZE from /dev/hvc1, runs stty on /dev/hvc0
-# write podroid-login wrapper: #!/bin/bash; cat /etc/motd; exec script -q -c 'exec /bin/bash --login' /dev/null
-boot_stage "Ready!"
-rm -f /run/boot_stage
-while true; do
-    /sbin/getty -n -l /usr/local/bin/podroid-login 0 hvc0 xterm-256color
-    sleep 1
-done
-```
+### OpenRC Services (build-rootfs/files/etc/init.d/)
 
-### podroid-login (written by init-podroid at runtime)
+| Service | Runlevel | Responsibility |
+|---------|----------|----------------|
+| `podroid-bootstrap` | default | cgroup v2 unified hierarchy, devpts/shm/mqueue, sysctl (net.ipv4.ip_forward=1, kernel.unprivileged_userns_clone=1), ZRAM swap, `mount --make-rshared /`, chmod 0666 /dev/{net/tun,fuse}, hostname |
+| `podroid-network` | default | `ip link set eth0 up`, IP 10.0.2.15/24, default route 10.0.2.2, /etc/resolv.conf |
+| `podroid-resize` | default | Daemon reading `RESIZE rows cols` lines from /dev/hvc1, running `stty rows N cols M < /dev/hvc0` |
+| `podroid-ready` | default | Emits the boot-stage markers consumed by `detectBootStage` |
+| `dropbear` | default | SSH (only when ssh=1 in kernel cmdline — guard logic in podroid-bootstrap) |
+
+### podroid-login (build-rootfs/files/usr/local/bin/podroid-login)
 ```bash
 #!/bin/bash
 cat /etc/motd 2>/dev/null
-exec /usr/bin/script -q -c 'exec /bin/bash --login' /dev/null
+exec /bin/bash --login
 ```
-The `script` wrapper is required for nvim to work correctly — it allocates a proper PTY inside the serial terminal session.
+No `script` wrapper needed any more — virtio-console (`/dev/hvc0`) reports a real `TIOCGWINSZ` via the resize daemon, so nvim/btop work without a fake PTY.
 
 ---
 
@@ -367,19 +382,17 @@ arrow(final): if mod==1 → "\x1b[$final"  else → "\x1b[1;$mod$final"
 
 ---
 
-## Dockerfile (Unified Multi-Stage)
+## Build Pipelines
 
-### Stages
-```
-downloader     — downloads Alpine netboot tarball (currently unused for vmlinuz — see CRITICAL below)
-rootfs-builder — --platform=linux/arm64/v8, installs all Alpine packages via apk, copies init-podroid as /init
-packer         — cpio + gzip the rootfs into initrd.img; copies vmlinuz from rootfs-builder
-qemu-builder   — debian:bookworm + NDK r27c, cross-compiles QEMU 11.0.0-rc2 + podroid-bridge + deps
-final          — scratch stage, collects all output artifacts
-```
+There are now **two** Docker pipelines:
 
-### CRITICAL: vmlinuz source
-The packer stage copies `vmlinuz-virt` from **`rootfs-builder /boot/vmlinuz-virt`** (the kernel installed by `apk add linux-virt`). This ensures vmlinuz and `/lib/modules/$KVER/` are the same version. **Never copy vmlinuz from the downloader/netboot tarball** — that is a different Alpine release and causes a kernel/modules version mismatch → `modprobe virtio_blk` silently fails → no block device → kernel panic.
+### `Dockerfile` (kernel + initramfs + QEMU)
+Custom Linux 6.6.87 (built from upstream tarball) + minimal initramfs (only `init-podroid` + a busybox + switch_root) + QEMU 11.0.0-rc2 cross-compiled against NDK r27c. Forced `=y` options include `EXT4_FS_SECURITY`, `SQUASHFS_XATTR`, `SQUASHFS_ZLIB`, `OVERLAY_FS`, `FUSE_FS`, `BRIDGE`, `IPV6`, `NF_TABLES`, `NFT_COMPAT`, MASQUERADE family, `VETH`, `TUN`. A build-time check fails the build if any go missing (silent Kconfig demotion guard).
+
+### `build-rootfs/Dockerfile.rootfs` (Alpine squashfs)
+Pulls `alpine-minirootfs-3.23.4-aarch64.tar.gz`, runs `build-rootfs.sh` to apk-install the userland (alpine-base, openrc, busybox-openrc, bash, podman, crun, fuse-overlayfs, iptables/ip6tables/nftables, slirp4netns, aardvark-dns, netavark, dropbear, shadow-uidmap, libcap-utils, doas, sudo, ca-certificates), seal the right caps on newuidmap/newgidmap, set wheel-group sudo/doas rules, copy in the OpenRC service files and /etc configs, then `mksquashfs -comp gzip -all-root -noappend` (no `-no-xattrs` so security.capability is preserved). Output: `app/src/main/assets/alpine-rootfs.squashfs` (~41 MB).
+
+**Why gzip and not lz4/zstd**: the kernel only enables `CONFIG_SQUASHFS_ZLIB=y`. lz4 squashfs fails to mount.
 
 ### QEMU Build Details
 - NDK r27c, API 28 sysroot
@@ -393,13 +406,15 @@ The packer stage copies `vmlinuz-virt` from **`rootfs-builder /boot/vmlinuz-virt
 ### 16KB Page Alignment
 All native libs must have `p_align >= 16384`. Enforced via `-Wl,-z,max-page-size=16384` everywhere. Required for Android devices with 16KB system pages. Verified by Python ELF parser in `build-all.sh`.
 
-### VM Rootfs Packages (Alpine 3.23 aarch64)
+### VM Rootfs Packages (Alpine 3.23 aarch64, build-rootfs.sh)
 ```
-linux-virt bash busybox busybox-extras ttyd podman podman-remote
-netavark aardvark-dns fuse-overlayfs slirp4netns iptables ip6tables
-shadow-uidmap ca-certificates crun curl e2fsprogs util-linux openrc
-dropbear ncurses-terminfo-base musl-locales
+alpine-base openrc busybox-openrc bash
+podman crun fuse-overlayfs aardvark-dns netavark slirp4netns
+iptables ip6tables nftables bridge-utils iproute2
+dropbear dropbear-openrc curl ca-certificates
+shadow shadow-uidmap libcap-utils doas sudo
 ```
+Plus runtime config: root password "podroid", `/etc/doas.d/doas.conf` = `permit persist :wheel`, `/etc/sudoers.d/wheel` = `%wheel ALL=(ALL) ALL`. Users created with `adduser -G wheel <name>` can run `doas` / `sudo` after entering their password.
 
 ---
 
@@ -409,7 +424,8 @@ All components are coordinated by `build-all.sh`:
 
 ```bash
 ./build-all.sh kernel      # Build custom kernel only (podroid_kernel.config, ~5–10 min)
-./build-all.sh initramfs   # Build custom kernel + Alpine initramfs (~10–15 min total)
+./build-all.sh initramfs   # Build kernel + minimal initramfs (~10–15 min)
+./build-all.sh rootfs      # Build Alpine squashfs (~30 s, Docker-cached)
 ./build-all.sh qemu        # Build QEMU + podroid-bridge via Docker (~30 min first time)
 ./build-all.sh termux      # Build libtermux.so via local NDK (16KB page alignment)
 ./build-all.sh apk         # Build Android APK via Gradle
@@ -442,6 +458,7 @@ adb shell run-as com.excp.podroid.debug cat files/console.log
 
 **Workflow**:
 - `init-podroid` changed → `./build-all.sh initramfs` → `gradlew assembleDebug` → `adb install`
+- `build-rootfs/files/**` or package list → `./build-all.sh rootfs` → `gradlew assembleDebug` → `adb install`
 - Kotlin/Java only → `gradlew assembleDebug` → `adb install`
 - `podroid-bridge.c` changed → fast bridge rebuild above → `adb install`
 - Check boot: `adb shell run-as com.excp.podroid.debug cat files/console.log`
@@ -528,15 +545,20 @@ Serialized as: "tcp:8080:80"
 ./build-all.sh initramfs && ./gradlew assembleDebug && adb uninstall com.excp.podroid.debug; adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```
 
+### Rebuild rootfs squashfs (OpenRC services / package list changed)
+```bash
+./build-all.sh rootfs && ./gradlew assembleDebug && adb install -r app/build/outputs/apk/debug/app-debug.apk
+```
+
 ### Check VM console output
 ```bash
 adb shell run-as com.excp.podroid.debug cat files/console.log
 ```
 
 ### Add a new boot stage
-1. Add `boot_stage "My stage..."` at correct position in `init-podroid`
+1. `echo "My stage..." > /dev/console` (or use the `boot_stage` helper) in the appropriate OpenRC service under `build-rootfs/files/etc/init.d/`
 2. Add match in `PodroidQemu.detectBootStage()`
-3. Rebuild initramfs
+3. Rebuild rootfs (`./build-all.sh rootfs`)
 
 ### Add a setting
 1. Add DataStore key + Flow in `SettingsRepository.kt`
@@ -560,7 +582,7 @@ adb shell run-as com.excp.podroid.debug cat files/console.log
 
 ### Add a new VM control channel message
 1. Add write to `ctrl.sock` in `podroid-bridge.c`
-2. Add handler in the resize daemon loop in `init-podroid` (reads from `/dev/hvc0`)
+2. Add handler in `build-rootfs/files/usr/local/bin/podroid-resize` (the daemon reading from `/dev/hvc1`)
 
 ---
 
@@ -592,15 +614,19 @@ adb shell run-as com.excp.podroid.debug cat files/console.log
 
 ---
 
-## Pending Work (as of 2026-04-25)
+## Pending Work (as of 2026-04-29)
 
 ### Next Feature: Container Hub
 Full container management screen — SSH into VM at `127.0.0.1:9922`, run `podman ps`, one-tap deploy from a catalog of services (Pi-hole, Vaultwarden, code-server, Gitea, Jellyfin, Uptime Kuma, Filebrowser, Nginx, Grafana). Requires JSch dependency.
 
 ### Other TODOs
-- **OpenRC integration**: Replace manual init-podroid boot with proper OpenRC service scripts (fixes `rc-service` and docker socket compatibility)
 - **Pin Dockerfile packages**: Add version pins to prevent reproducibility breaks
 - **DNS configurable**: Currently hardcoded 8.8.8.8 + 1.1.1.1; add settings UI
 - **Overlay mount validation**: Detect and surface overlay failures with actionable error
 - **Terminal title → TopAppBar**: Wire `onTitleChanged()` to update app bar from OSC sequences
 - **Custom font loading**: Allow users to load their own .ttf files (GitHub issue #5)
+
+### Recently shipped (1.1.6)
+- **OpenRC migration**: Real Alpine root running OpenRC as PID 1; `apk add docker; rc-update add docker` now works and persists across reboots
+- **Adaptive UI**: Phone-landscape and tablet layouts in setup / home / settings / terminal; chip-row selectors with horizontal fade indicators; Quick Settings dialog with left-edge vertical scrollbar
+- **Issue #17 fix**: `podman exec -it` works rootful and rootless after switch_root replaces chroot
