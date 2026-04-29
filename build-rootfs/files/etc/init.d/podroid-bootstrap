@@ -56,7 +56,31 @@ start() {
     # sysctl for container networking
     sysctl -qw net.ipv4.ip_forward=1 \
         net.ipv4.conf.all.forwarding=1 \
-        net.bridge.bridge-nf-call-iptables=1 2>/dev/null
+        net.ipv6.conf.all.forwarding=1 \
+        net.ipv6.conf.default.forwarding=1 \
+        net.bridge.bridge-nf-call-iptables=1 \
+        net.bridge.bridge-nf-call-ip6tables=1 2>/dev/null
+
+    # Bind /var/lib/docker onto raw ext4. Docker's overlay2 storage driver
+    # mounts an overlay per container with /var/lib/docker as the upper.
+    # Linux refuses to use an overlay as the upper of another overlay
+    # (returns EINVAL), so without this, `docker run` fails on any image.
+    # The bind makes Docker's state live directly on the persistent ext4
+    # disk, sidestepping the nested-overlay rejection.
+    mkdir -p /mnt/persist/docker /var/lib/docker 2>/dev/null
+    mountpoint -q /var/lib/docker || mount --bind /mnt/persist/docker /var/lib/docker
+
+    # LXC: pre-create lxcbr0 (10.0.3.1/24) so `lxc-start` works out of the
+    # box. Containers reach the internet via MASQUERADE → eth0 → SLIRP.
+    # The Alpine lxc-bridge package only ships dnsmasq config, not a
+    # service to actually create the bridge — so we do it here.
+    if ! ip link show lxcbr0 >/dev/null 2>&1; then
+        ip link add name lxcbr0 type bridge 2>/dev/null
+        ip addr add 10.0.3.1/24 dev lxcbr0 2>/dev/null
+        ip link set lxcbr0 up 2>/dev/null
+        iptables -t nat -C POSTROUTING -s 10.0.3.0/24 ! -o lxcbr0 -j MASQUERADE 2>/dev/null \
+            || iptables -t nat -A POSTROUTING -s 10.0.3.0/24 ! -o lxcbr0 -j MASQUERADE 2>/dev/null
+    fi
 
     eend 0
 }
