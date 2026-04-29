@@ -10,6 +10,8 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -17,6 +19,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
@@ -35,6 +38,7 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -120,81 +124,42 @@ fun SettingsScreen(
                     .verticalScroll(rememberScrollState())
                     .padding(horizontal = 16.dp),
             ) {
-            Spacer(Modifier.height(8.dp))
+            Spacer(Modifier.height(16.dp))
 
             // ── VM Resources ─────────────────────────────────────────
-            SettingsSectionHeader("VM Resources")
+            SettingsSection(title = "VM Resources") {
+                if (!vmNotRunning) {
+                    Text(
+                        text = "Stop the VM to change these settings.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.padding(bottom = 8.dp),
+                    )
+                }
 
-            if (!vmNotRunning) {
-                Text(
-                    text = "Stop the VM to change these settings.",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.error,
-                    modifier = Modifier.padding(bottom = 8.dp),
+                Text("Memory", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text("$vmRamMb MB", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                Spacer(Modifier.height(8.dp))
+                ChipRow(
+                    options = ramOptions,
+                    selected = vmRamMb,
+                    enabled = vmNotRunning,
+                    label = { ram -> if (ram >= 1024) "${ram / 1024} GB" else "$ram MB" },
+                    onSelect = { viewModel.setVmRamMb(it) },
                 )
-            }
 
-            Text(
-                text = "Memory: $vmRamMb MB",
-                style = MaterialTheme.typography.bodyMedium,
-            )
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(vertical = 4.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                ramOptions.forEach { ram ->
-                    FilledTonalButton(
-                        onClick = { viewModel.setVmRamMb(ram) },
-                        enabled = vmNotRunning,
-                        modifier = Modifier.weight(1f),
-                        colors = if (vmRamMb == ram) {
-                            ButtonDefaults.filledTonalButtonColors(
-                                containerColor = MaterialTheme.colorScheme.primary,
-                                contentColor = MaterialTheme.colorScheme.onPrimary,
-                            )
-                        } else {
-                            ButtonDefaults.filledTonalButtonColors()
-                        },
-                    ) {
-                        Text(
-                            if (ram >= 1024) "${ram / 1024}G" else "${ram}M",
-                            style = MaterialTheme.typography.labelSmall,
-                        )
-                    }
-                }
-            }
+                Spacer(Modifier.height(16.dp))
 
-            Spacer(Modifier.height(8.dp))
-
-            Text(
-                text = "CPU cores: $vmCpus",
-                style = MaterialTheme.typography.bodyMedium,
-            )
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(vertical = 4.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                cpuOptions.forEach { cpu ->
-                    FilledTonalButton(
-                        onClick = { viewModel.setVmCpus(cpu) },
-                        enabled = vmNotRunning,
-                        modifier = Modifier.weight(1f),
-                        colors = if (vmCpus == cpu) {
-                            ButtonDefaults.filledTonalButtonColors(
-                                containerColor = MaterialTheme.colorScheme.primary,
-                                contentColor = MaterialTheme.colorScheme.onPrimary,
-                            )
-                        } else {
-                            ButtonDefaults.filledTonalButtonColors()
-                        },
-                    ) {
-                        Text("$cpu", style = MaterialTheme.typography.labelSmall)
-                    }
-                }
+                Text("CPU cores", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text("$vmCpus", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                Spacer(Modifier.height(8.dp))
+                ChipRow(
+                    options = cpuOptions,
+                    selected = vmCpus,
+                    enabled = vmNotRunning,
+                    label = { cpu -> "$cpu" },
+                    onSelect = { viewModel.setVmCpus(it) },
+                )
             }
 
             Spacer(Modifier.height(8.dp))
@@ -203,140 +168,151 @@ fun SettingsScreen(
 
             Spacer(Modifier.height(4.dp))
 
-            // Storage size (read-only — set at first boot)
-            Text(
-                text = "Persistent storage: $storageSizeGb GB",
-                style = MaterialTheme.typography.bodyMedium,
-            )
-            Text(
-                text = "Set during initial setup. Reset the VM to change.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(top = 2.dp, bottom = 8.dp),
-            )
+            // ── Storage ───────────────────────────────────────────────
+            SettingsSection(title = "Storage") {
+                Text("Persistent storage", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text("$storageSizeGb GB", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                Text(
+                    text = "Set during initial setup. Reset the VM to change.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 2.dp, bottom = 12.dp),
+                )
+                DownloadsSharingCard(
+                    enabled = storageAccessEnabled,
+                    vmNotRunning = vmNotRunning,
+                    onToggle = { viewModel.setStorageAccessEnabled(it) },
+                )
+            }
 
-            DownloadsSharingCard(
-                enabled = storageAccessEnabled,
-                vmNotRunning = vmNotRunning,
-                onToggle = { viewModel.setStorageAccessEnabled(it) },
-            )
-
-            Spacer(Modifier.height(16.dp))
+            Spacer(Modifier.height(8.dp))
 
             // ── Network ───────────────────────────────────────────────
-            SettingsSectionHeader("Network")
-
-            val phoneIp = viewModel.phoneIp
-            Text(
-                text = "Phone IP: $phoneIp — point your devices here.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.primary,
-                fontWeight = FontWeight.Medium,
-                modifier = Modifier.padding(bottom = 4.dp),
-            )
-            SettingsSwitchRow(
-                title = "Enable SSH",
-                subtitle = if (sshEnabled) "ssh root@<phone-ip> -p 9922  |  password: podroid" else "Access the VM over your local network via SSH",
-                checked = sshEnabled,
-                onCheckedChange = { viewModel.setSshEnabled(it) },
-            )
-            Text(
-                text = "Rules forward ports from your Android device into the VM. Active immediately when VM is running.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(bottom = 8.dp),
-            )
-
-            if (portForwardRules.isEmpty()) {
+            SettingsSection(title = "Network") {
+                val phoneIp = viewModel.phoneIp
                 Text(
-                    text = "No rules configured.",
+                    text = "Phone IP: $phoneIp",
                     style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(vertical = 8.dp),
+                    color = MaterialTheme.colorScheme.primary,
+                    fontWeight = FontWeight.SemiBold,
                 )
-            } else {
-                portForwardRules.forEach { rule ->
-                    PortForwardRuleRow(
-                        rule = rule,
-                        onDelete = { viewModel.removePortForward(rule) },
+                Text(
+                    text = "Point your devices here to reach the VM.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(bottom = 12.dp),
+                )
+                SettingsSwitchRow(
+                    title = "Enable SSH",
+                    subtitle = if (sshEnabled) "ssh root@<phone-ip> -p 9922  |  password: podroid" else "Access the VM over your local network via SSH",
+                    checked = sshEnabled,
+                    onCheckedChange = { viewModel.setSshEnabled(it) },
+                )
+                Spacer(Modifier.height(8.dp))
+                HorizontalDivider()
+                Spacer(Modifier.height(12.dp))
+                Text("Port forwards", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+                Text(
+                    text = "Forward ports from your Android device into the VM. Active immediately when VM is running.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 2.dp, bottom = 8.dp),
+                )
+
+                if (portForwardRules.isEmpty()) {
+                    Text(
+                        text = "No rules configured.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(vertical = 8.dp),
+                    )
+                } else {
+                    portForwardRules.forEach { rule ->
+                        PortForwardRuleRow(
+                            rule = rule,
+                            onDelete = { viewModel.removePortForward(rule) },
+                        )
+                    }
+                }
+                Spacer(Modifier.height(8.dp))
+                FilledTonalButton(
+                    onClick = { showAddDialog = true },
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(14.dp),
+                ) {
+                    Icon(Icons.Default.Add, contentDescription = null)
+                    Spacer(Modifier.width(8.dp))
+                    Text("Add Port Forward")
+                }
+                if (vmState is VmState.Running) {
+                    Text(
+                        text = "VM is running — new rules take effect immediately.",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.padding(top = 6.dp),
                     )
                 }
             }
 
             Spacer(Modifier.height(8.dp))
 
-            FilledTonalButton(
-                onClick = { showAddDialog = true },
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                Icon(Icons.Default.Add, contentDescription = null)
-                Spacer(Modifier.width(8.dp))
-                Text("Add Port Forward")
-            }
-
-            if (vmState is VmState.Running) {
-                Text(
-                    text = "VM is running — new rules take effect immediately.",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier.padding(top = 4.dp),
+            // ── Appearance ────────────────────────────────────────────
+            SettingsSection(title = "Appearance") {
+                SettingsSwitchRow(
+                    title = "Dark theme",
+                    subtitle = "Use a dark color scheme",
+                    checked = darkTheme,
+                    onCheckedChange = { viewModel.setDarkTheme(it) },
                 )
             }
-
-            Spacer(Modifier.height(16.dp))
-
-            SettingsSectionHeader("Appearance")
-            SettingsSwitchRow(
-                title = "Dark theme",
-                subtitle = "Use a dark color scheme",
-                checked = darkTheme,
-                onCheckedChange = { viewModel.setDarkTheme(it) },
-            )
-            Spacer(Modifier.height(16.dp))
-
-            SettingsSectionHeader("Diagnostics")
-
-            FilledTonalButton(
-                onClick = { viewModel.exportConsoleLogs() },
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                Icon(Icons.Default.Share, contentDescription = null)
-                Spacer(Modifier.width(8.dp))
-                Text("Export Diagnostic Log")
-            }
-            Text(
-                text = "Shares log.txt with app info, settings, VM state, app logcat, and QEMU console output. Attach this when reporting bugs.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(top = 4.dp),
-            )
 
             Spacer(Modifier.height(8.dp))
 
-            FilledTonalButton(
-                onClick = { showResetDialog = true },
-                enabled = vmNotRunning,
-                modifier = Modifier.fillMaxWidth(),
-                colors = ButtonDefaults.filledTonalButtonColors(
-                    containerColor = MaterialTheme.colorScheme.errorContainer,
-                    contentColor = MaterialTheme.colorScheme.onErrorContainer,
-                ),
-            ) {
-                Icon(Icons.Default.RestartAlt, contentDescription = null)
-                Spacer(Modifier.width(8.dp))
-                Text("Full App Reset")
-            }
-
-            if (!vmNotRunning) {
+            // ── Diagnostics ───────────────────────────────────────────
+            SettingsSection(title = "Diagnostics") {
+                FilledTonalButton(
+                    onClick = { viewModel.exportConsoleLogs() },
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(14.dp),
+                ) {
+                    Icon(Icons.Default.Share, contentDescription = null)
+                    Spacer(Modifier.width(8.dp))
+                    Text("Export Diagnostic Log")
+                }
                 Text(
-                    text = "Stop the VM before resetting.",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.error,
-                    modifier = Modifier.padding(top = 4.dp),
+                    text = "Shares log.txt with app info, settings, VM state, app logcat, and QEMU console output. Attach this when reporting bugs.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 8.dp),
                 )
+
+                Spacer(Modifier.height(12.dp))
+
+                FilledTonalButton(
+                    onClick = { showResetDialog = true },
+                    enabled = vmNotRunning,
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(14.dp),
+                    colors = ButtonDefaults.filledTonalButtonColors(
+                        containerColor = MaterialTheme.colorScheme.errorContainer,
+                        contentColor = MaterialTheme.colorScheme.onErrorContainer,
+                    ),
+                ) {
+                    Icon(Icons.Default.RestartAlt, contentDescription = null)
+                    Spacer(Modifier.width(8.dp))
+                    Text("Full App Reset")
+                }
+                if (!vmNotRunning) {
+                    Text(
+                        text = "Stop the VM before resetting.",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.padding(top = 6.dp),
+                    )
+                }
             }
 
-            Spacer(Modifier.height(16.dp))
+            Spacer(Modifier.height(8.dp))
 
             // ── Advanced QEMU ─────────────────────────────────────────
             Row(
@@ -423,14 +399,14 @@ fun SettingsScreen(
             }
 
             // ── About ─────────────────────────────────────────────────
-            SettingsSectionHeader("About")
-
-            SettingsInfoRow("Version", BuildConfig.VERSION_NAME)
-            SettingsInfoRow("QEMU", BuildConfig.QEMU_VERSION)
-            SettingsInfoRow("Architecture", "AArch64 (ARM64)")
-            SettingsInfoRow("Linux distro", "Alpine Linux 3.23")
-            SettingsInfoRow("Container runtime", "Podman + crun")
-            SettingsInfoRow("Storage", "$storageSizeGb GB persistent overlay")
+            SettingsSection(title = "About") {
+                SettingsInfoRow("Version", BuildConfig.VERSION_NAME)
+                SettingsInfoRow("QEMU", BuildConfig.QEMU_VERSION)
+                SettingsInfoRow("Architecture", "AArch64 (ARM64)")
+                SettingsInfoRow("Linux distro", "Alpine Linux 3.23")
+                SettingsInfoRow("Container runtime", "Podman + crun")
+                SettingsInfoRow("Storage", "$storageSizeGb GB persistent overlay")
+            }
 
             Spacer(Modifier.height(32.dp))
         }
@@ -595,6 +571,69 @@ private fun SettingsSectionHeader(title: String) {
         )
         HorizontalDivider()
         Spacer(Modifier.height(8.dp))
+    }
+}
+
+/** Card-grouped section: header above + a surface-tinted card around the content. */
+@Composable
+private fun SettingsSection(
+    title: String,
+    content: @Composable () -> Unit,
+) {
+    Text(
+        text = title.uppercase(),
+        style = MaterialTheme.typography.labelMedium,
+        color = MaterialTheme.colorScheme.primary,
+        fontWeight = FontWeight.SemiBold,
+        modifier = Modifier.padding(start = 4.dp, top = 12.dp, bottom = 8.dp),
+    )
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(20.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f),
+        ),
+    ) {
+        Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 16.dp)) {
+            content()
+        }
+    }
+}
+
+/** Row of FilterChips for picking one value out of a list (RAM, CPUs, etc.). */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun <T> ChipRow(
+    options: List<T>,
+    selected: T,
+    enabled: Boolean,
+    label: (T) -> String,
+    onSelect: (T) -> Unit,
+) {
+    FlowRow(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        options.forEach { option ->
+            FilterChip(
+                selected = option == selected,
+                enabled = enabled,
+                onClick = { onSelect(option) },
+                label = {
+                    Text(
+                        text = label(option),
+                        style = MaterialTheme.typography.labelLarge,
+                        fontWeight = if (option == selected) FontWeight.Bold else FontWeight.Normal,
+                    )
+                },
+                shape = RoundedCornerShape(14.dp),
+                colors = FilterChipDefaults.filterChipColors(
+                    selectedContainerColor = MaterialTheme.colorScheme.primaryContainer,
+                    selectedLabelColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                ),
+            )
+        }
     }
 }
 

@@ -6,8 +6,11 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -27,12 +30,16 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.FilterChipDefaults
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -59,7 +66,15 @@ import kotlinx.coroutines.delay
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.BlendMode
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.CompositingStrategy
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -429,86 +444,114 @@ private fun QuickSettingsDialog(
     onColorThemeChange: (String) -> Unit,
     terminalFont: String,
     onFontChange: (String) -> Unit,
+    viewModel: TerminalViewModel = hiltViewModel(),
 ) {
-    var showThemeDialog by remember { mutableStateOf(false) }
-    var showFontDialog by remember { mutableStateOf(false) }
-    
-    if (showThemeDialog) {
-        ThemeSelectionDialog(
-            currentTheme = colorTheme,
-            onThemeSelect = {
-                onColorThemeChange(it)
-                showThemeDialog = false
-            },
-            onDismiss = { showThemeDialog = false }
-        )
-    }
-    
-    if (showFontDialog) {
-        FontSelectionDialog(
-            currentFont = terminalFont,
-            onFontSelect = {
-                onFontChange(it)
-                showFontDialog = false
-            },
-            onDismiss = { showFontDialog = false }
-        )
-    }
-    
+    val themes = remember { viewModel.listAssetNames("colors", ".properties") }
+    val fonts = remember { viewModel.listAssetNames("fonts", ".ttf") }
+    val fontSizes = listOf(12, 14, 16, 18, 20, 22, 24, 28, 32)
+
+    val scrollState = rememberScrollState()
+    val scrollbarColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.55f)
+    val scrollTrackColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f)
+
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("Quick Settings") },
         text = {
-            Column {
-                Text("Font Size: $fontSize sp", style = MaterialTheme.typography.labelMedium)
-                androidx.compose.material3.Slider(
-                    value = fontSize.toFloat(),
-                    onValueChange = { onFontSizeChange(it.toInt()) },
-                    valueRange = 12f..32f,
-                    steps = 20,
-                    modifier = Modifier.padding(top = 4.dp, bottom = 16.dp)
-                )
-                
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    FilledTonalButton(
-                        onClick = { showThemeDialog = true },
-                        modifier = Modifier.weight(1f)
+            Box(
+                modifier = Modifier.verticalScrollbar(
+                    state = scrollState,
+                    thumbColor = scrollbarColor,
+                    trackColor = scrollTrackColor,
+                ),
+            ) {
+            Column(
+                modifier = Modifier
+                    .verticalScroll(scrollState)
+                    .padding(start = 10.dp),
+                verticalArrangement = Arrangement.spacedBy(20.dp),
+            ) {
+                // ── Font size ──────────────────────────────────────
+                val sizeIdx = fontSizes.indexOf(fontSize).coerceAtLeast(0)
+                val sizeListState = rememberLazyListState(sizeIdx)
+                QuickSettingsRow(label = "Font size", value = "$fontSize sp") {
+                    LazyRow(
+                        state = sizeListState,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        contentPadding = PaddingValues(horizontal = 4.dp),
+                        modifier = Modifier.fadingEdges(sizeListState),
                     ) {
-                        Text("Theme")
+                        items(fontSizes.size) { i ->
+                            val sz = fontSizes[i]
+                            QuickChip(
+                                label = "$sz",
+                                selected = sz == fontSize,
+                                onClick = { onFontSizeChange(sz) },
+                            )
+                        }
                     }
-                    FilledTonalButton(
-                        onClick = { showFontDialog = true },
-                        modifier = Modifier.weight(1f)
+                }
+
+                // ── Color theme ────────────────────────────────────
+                val themeIdx = themes.indexOf(colorTheme).coerceAtLeast(0)
+                val themeListState = rememberLazyListState(themeIdx)
+                QuickSettingsRow(label = "Color theme", value = prettyName(colorTheme)) {
+                    LazyRow(
+                        state = themeListState,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        contentPadding = PaddingValues(horizontal = 4.dp),
+                        modifier = Modifier.fadingEdges(themeListState),
                     ) {
-                        Text("Font")
+                        items(themes.size) { i ->
+                            val t = themes[i]
+                            QuickChip(
+                                label = prettyName(t),
+                                selected = t == colorTheme,
+                                onClick = { onColorThemeChange(t) },
+                            )
+                        }
                     }
                 }
-                
-                Spacer(modifier = Modifier.height(16.dp))
-                
+
+                // ── Font family ────────────────────────────────────
+                val fontIdx = fonts.indexOf(terminalFont).coerceAtLeast(0)
+                val fontListState = rememberLazyListState(fontIdx)
+                QuickSettingsRow(label = "Font family", value = prettyName(terminalFont)) {
+                    LazyRow(
+                        state = fontListState,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        contentPadding = PaddingValues(horizontal = 4.dp),
+                        modifier = Modifier.fadingEdges(fontListState),
+                    ) {
+                        items(fonts.size) { i ->
+                            val f = fonts[i]
+                            QuickChip(
+                                label = prettyName(f),
+                                selected = f == terminalFont,
+                                onClick = { onFontChange(f) },
+                            )
+                        }
+                    }
+                }
+
+                HorizontalDivider()
+
+                // ── Switches ───────────────────────────────────────
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically
+                    verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Text("Show extra keys", modifier = Modifier.weight(1f))
-                    androidx.compose.material3.Switch(
-                        checked = showExtraKeys,
-                        onCheckedChange = onToggleExtraKeys
-                    )
+                    Text("Show extra keys", style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
+                    Switch(checked = showExtraKeys, onCheckedChange = onToggleExtraKeys)
                 }
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically
+                    verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Text("Haptic feedback", modifier = Modifier.weight(1f))
-                    androidx.compose.material3.Switch(
-                        checked = hapticsEnabled,
-                        onCheckedChange = onToggleHaptics
-                    )
+                    Text("Haptic feedback", style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
+                    Switch(checked = hapticsEnabled, onCheckedChange = onToggleHaptics)
                 }
+            }
             }
         },
         confirmButton = {
@@ -516,6 +559,142 @@ private fun QuickSettingsDialog(
                 Text("Done")
             }
         }
+    )
+}
+
+@Composable
+private fun QuickSettingsRow(
+    label: String,
+    value: String,
+    content: @Composable () -> Unit,
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.Bottom,
+        ) {
+            Text(
+                label,
+                style = MaterialTheme.typography.labelLarge,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Text(
+                value,
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.primary,
+                fontWeight = FontWeight.SemiBold,
+            )
+        }
+        content()
+    }
+}
+
+@Composable
+private fun QuickChip(
+    label: String,
+    selected: Boolean,
+    onClick: () -> Unit,
+) {
+    FilterChip(
+        selected = selected,
+        onClick = onClick,
+        label = {
+            Text(
+                label,
+                style = MaterialTheme.typography.labelLarge,
+                fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
+            )
+        },
+        shape = RoundedCornerShape(14.dp),
+        colors = FilterChipDefaults.filterChipColors(
+            selectedContainerColor = MaterialTheme.colorScheme.primaryContainer,
+            selectedLabelColor = MaterialTheme.colorScheme.onPrimaryContainer,
+        ),
+    )
+}
+
+/** "monokai-bright" → "Monokai bright"; trims `.properties`/`.ttf` if present. */
+private fun prettyName(raw: String): String =
+    raw.substringBeforeLast('.')
+        .replace('-', ' ')
+        .replace('_', ' ')
+        .replaceFirstChar { it.uppercaseChar() }
+
+/**
+ * Horizontal gradient fade at the edges of a scrollable container, drawn only
+ * on the side(s) where more content exists. Uses an offscreen layer + DstIn
+ * blend so the fade actually masks the chips rather than overpainting them.
+ */
+private fun Modifier.fadingEdges(
+    state: androidx.compose.foundation.lazy.LazyListState,
+    fadeWidth: Dp = 28.dp,
+): Modifier = this
+    .graphicsLayer { compositingStrategy = CompositingStrategy.Offscreen }
+    .drawWithContent {
+        drawContent()
+        val fadePx = fadeWidth.toPx()
+        if (state.canScrollBackward) {
+            drawRect(
+                topLeft = Offset.Zero,
+                size = Size(fadePx, size.height),
+                brush = Brush.horizontalGradient(
+                    listOf(Color.Transparent, Color.Black),
+                    startX = 0f,
+                    endX = fadePx,
+                ),
+                blendMode = BlendMode.DstIn,
+            )
+        }
+        if (state.canScrollForward) {
+            drawRect(
+                topLeft = Offset(size.width - fadePx, 0f),
+                size = Size(fadePx, size.height),
+                brush = Brush.horizontalGradient(
+                    listOf(Color.Black, Color.Transparent),
+                    startX = size.width - fadePx,
+                    endX = size.width,
+                ),
+                blendMode = BlendMode.DstIn,
+            )
+        }
+    }
+
+/**
+ * Thin scrollbar drawn on the LEFT edge of the container. Track is always
+ * visible (so users see "scrollable area"), thumb only appears when the
+ * content actually overflows. The thumb size is proportional to viewport /
+ * total content; its Y offset reflects current scroll position.
+ */
+private fun Modifier.verticalScrollbar(
+    state: androidx.compose.foundation.ScrollState,
+    width: Dp = 3.dp,
+    thumbColor: Color,
+    trackColor: Color,
+    minThumbHeight: Dp = 32.dp,
+): Modifier = this.drawWithContent {
+    drawContent()
+    val maxValue = state.maxValue
+    if (maxValue <= 0) return@drawWithContent
+
+    val widthPx = width.toPx()
+    val viewportH = size.height
+    val totalH = viewportH + maxValue
+    val thumbH = (viewportH * viewportH / totalH).coerceAtLeast(minThumbHeight.toPx())
+    val thumbY = (state.value.toFloat() / maxValue) * (viewportH - thumbH)
+    val cornerPx = widthPx / 2f
+
+    drawRoundRect(
+        color = trackColor,
+        topLeft = Offset(0f, 0f),
+        size = Size(widthPx, viewportH),
+        cornerRadius = androidx.compose.ui.geometry.CornerRadius(cornerPx, cornerPx),
+    )
+    drawRoundRect(
+        color = thumbColor,
+        topLeft = Offset(0f, thumbY),
+        size = Size(widthPx, thumbH),
+        cornerRadius = androidx.compose.ui.geometry.CornerRadius(cornerPx, cornerPx),
     )
 }
 

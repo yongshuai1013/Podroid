@@ -5,6 +5,7 @@ import android.net.Uri
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -12,6 +13,8 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.PowerSettingsNew
@@ -33,6 +36,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.windowsizeclass.WindowHeightSizeClass
 import androidx.compose.material3.windowsizeclass.WindowSizeClass
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -89,6 +93,8 @@ fun HomeScreen(
         )
     }
 
+    val isCompactHeight = windowSizeClass.heightSizeClass == WindowHeightSizeClass.Compact
+
     Scaffold(
         topBar = {
             TopAppBar(
@@ -105,168 +111,206 @@ fun HomeScreen(
             windowSizeClass = windowSizeClass,
             modifier = Modifier
                 .fillMaxSize()
-                .padding(innerPadding)
+                .padding(innerPadding),
+            maxWidth = if (isCompactHeight) 900 else 600,
         ) {
-            Column(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(horizontal = 24.dp),
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.spacedBy(20.dp),
-            ) {
-            Spacer(modifier = Modifier.height(24.dp))
-
-            // Animated boot progress replaces the plain CircularProgressIndicator
-            // Visible only while boot is starting to keep existing VM/state logic intact
-            Box(modifier = Modifier.size(72.dp), contentAlignment = Alignment.Center) {
-                if (isStarting) {
-                    // Custom animated boot progress
-                    com.excp.podroid.ui.screens.home.AnimatedBootProgress(
-                        bootStage = bootStage,
-                        modifier = Modifier.size(72.dp)
-                    )
-                } else {
-                    Icon(
-                        imageVector = Icons.Default.Terminal,
-                        contentDescription = null,
-                        modifier = Modifier.size(72.dp),
-                        tint = if (isRunning)
-                            MaterialTheme.colorScheme.primary
-                        else
-                            MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-            }
-
-            // Status text
-            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                Text(
-                    text = when {
-                        isStarting -> "Starting…"
-                        isRunning  -> "VM is running"
-                        else       -> "VM is stopped"
-                    },
-                    style = MaterialTheme.typography.headlineSmall,
-                    fontWeight = FontWeight.SemiBold,
-                    color = when {
-                        isStarting -> MaterialTheme.colorScheme.primary
-                        isRunning  -> MaterialTheme.colorScheme.primary
-                        else       -> MaterialTheme.colorScheme.onSurfaceVariant
-                    },
-                )
-
-                if (isStarting && bootStage.isNotEmpty()) {
-                    Spacer(Modifier.height(4.dp))
-                    Text(
-                        text = bootStage,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-            }
-
-            // Start / Stop button
-            Button(
-                onClick = {
-                    if (isRunning || isStarting) viewModel.stopVm()
-                    else viewModel.startPodroid()
-                },
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(56.dp),
-                shape = RoundedCornerShape(16.dp),
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = if (isRunning || isStarting)
-                        MaterialTheme.colorScheme.error
-                    else
-                        MaterialTheme.colorScheme.primary,
-                ),
-            ) {
-                Icon(Icons.Default.PowerSettingsNew, contentDescription = null,
-                    modifier = Modifier.size(22.dp))
-                Spacer(Modifier.width(10.dp))
-                Text(
-                    text = if (isRunning || isStarting) "Stop VM" else "Start VM",
-                    style = MaterialTheme.typography.titleMedium,
-                )
-            }
-
-            // Restart button
-            if (isRunning) {
-                FilledTonalButton(
-                    onClick = { viewModel.restartVm() },
+            if (isCompactHeight) {
+                // Landscape phone: hero on left, action buttons on right
+                Row(
                     modifier = Modifier
-                        .fillMaxWidth()
-                        .height(48.dp),
-                    shape = RoundedCornerShape(16.dp),
+                        .fillMaxSize()
+                        .padding(horizontal = 24.dp, vertical = 16.dp),
+                    verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Icon(Icons.Default.Refresh, contentDescription = null,
-                        modifier = Modifier.size(20.dp))
-                    Spacer(Modifier.width(8.dp))
-                    Text("Restart VM")
-                }
-            }
-
-            // Error card
-            if (vmState is VmState.Error) {
-                Card(
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(16.dp),
-                    colors = CardDefaults.cardColors(
-                        containerColor = MaterialTheme.colorScheme.errorContainer,
-                    ),
-                ) {
-                    Column(modifier = Modifier.padding(16.dp)) {
-                        Text(
-                            text = (vmState as VmState.Error).message,
-                            color = MaterialTheme.colorScheme.onErrorContainer,
-                            style = MaterialTheme.typography.bodyMedium,
+                    Column(
+                        modifier = Modifier.weight(1f),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Center,
+                    ) {
+                        StatusHero(isStarting = isStarting, isRunning = isRunning, bootStage = bootStage, iconSize = 64)
+                    }
+                    Spacer(Modifier.width(24.dp))
+                    Column(
+                        modifier = Modifier
+                            .weight(1f)
+                            .verticalScroll(rememberScrollState()),
+                        verticalArrangement = Arrangement.spacedBy(12.dp),
+                    ) {
+                        HomeActionButtons(
+                            vmState = vmState,
+                            isRunning = isRunning,
+                            isStarting = isStarting,
+                            onStart = { viewModel.startPodroid() },
+                            onStop = { viewModel.stopVm() },
+                            onRestart = { viewModel.restartVm() },
+                            onOpenTerminal = onNavigateToTerminal,
                         )
-                        Spacer(Modifier.height(12.dp))
-                        Button(
-                            onClick = { viewModel.startPodroid() },
-                            modifier = Modifier.fillMaxWidth(),
-                            shape = RoundedCornerShape(12.dp),
-                        ) {
-                            Icon(Icons.Default.Refresh, contentDescription = null,
-                                modifier = Modifier.size(18.dp))
-                            Spacer(Modifier.width(8.dp))
-                            Text("Try again")
-                        }
                     }
                 }
-            }
-
-            // Open Terminal button
-            if (isRunning) {
-                FilledTonalButton(
-                    onClick = onNavigateToTerminal,
+            } else {
+                // Portrait / tall: vertical stack
+                Column(
                     modifier = Modifier
-                        .fillMaxWidth()
-                        .height(56.dp),
-                    shape = RoundedCornerShape(16.dp),
+                        .fillMaxSize()
+                        .verticalScroll(rememberScrollState())
+                        .padding(horizontal = 24.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(20.dp),
                 ) {
-                    Icon(Icons.Default.Terminal, contentDescription = null,
-                        modifier = Modifier.size(22.dp))
-                    Spacer(Modifier.width(10.dp))
-                    Text(
-                        text = "Open Terminal",
-                        style = MaterialTheme.typography.titleMedium,
+                    Spacer(modifier = Modifier.height(24.dp))
+                    StatusHero(isStarting = isStarting, isRunning = isRunning, bootStage = bootStage, iconSize = 72)
+                    HomeActionButtons(
+                        vmState = vmState,
+                        isRunning = isRunning,
+                        isStarting = isStarting,
+                        onStart = { viewModel.startPodroid() },
+                        onStop = { viewModel.stopVm() },
+                        onRestart = { viewModel.restartVm() },
+                        onOpenTerminal = onNavigateToTerminal,
                     )
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        text = "Alpine Linux · Podman · QEMU",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        textAlign = TextAlign.Center,
+                    )
+                    Spacer(Modifier.height(8.dp))
                 }
             }
+        }
+    }
+}
 
-            Spacer(modifier = Modifier.weight(1f))
-
+@Composable
+private fun StatusHero(
+    isStarting: Boolean,
+    isRunning: Boolean,
+    bootStage: String,
+    iconSize: Int,
+) {
+    Box(modifier = Modifier.size(iconSize.dp), contentAlignment = Alignment.Center) {
+        if (isStarting) {
+            com.excp.podroid.ui.screens.home.AnimatedBootProgress(
+                bootStage = bootStage,
+                modifier = Modifier.size(iconSize.dp)
+            )
+        } else {
+            Icon(
+                imageVector = Icons.Default.Terminal,
+                contentDescription = null,
+                modifier = Modifier.size(iconSize.dp),
+                tint = if (isRunning)
+                    MaterialTheme.colorScheme.primary
+                else
+                    MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+    Spacer(Modifier.height(16.dp))
+    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        Text(
+            text = when {
+                isStarting -> "Starting…"
+                isRunning  -> "VM is running"
+                else       -> "VM is stopped"
+            },
+            style = MaterialTheme.typography.headlineSmall,
+            fontWeight = FontWeight.SemiBold,
+            color = when {
+                isStarting -> MaterialTheme.colorScheme.primary
+                isRunning  -> MaterialTheme.colorScheme.primary
+                else       -> MaterialTheme.colorScheme.onSurfaceVariant
+            },
+        )
+        if (isStarting && bootStage.isNotEmpty()) {
+            Spacer(Modifier.height(4.dp))
             Text(
-                text = "Alpine Linux · Podman · QEMU",
+                text = bootStage,
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 textAlign = TextAlign.Center,
             )
+        }
+    }
+}
 
-            Spacer(Modifier.height(8.dp))
+@Composable
+private fun HomeActionButtons(
+    vmState: VmState,
+    isRunning: Boolean,
+    isStarting: Boolean,
+    onStart: () -> Unit,
+    onStop: () -> Unit,
+    onRestart: () -> Unit,
+    onOpenTerminal: () -> Unit,
+) {
+    Button(
+        onClick = { if (isRunning || isStarting) onStop() else onStart() },
+        modifier = Modifier.fillMaxWidth().height(56.dp),
+        shape = RoundedCornerShape(16.dp),
+        colors = ButtonDefaults.buttonColors(
+            containerColor = if (isRunning || isStarting)
+                MaterialTheme.colorScheme.error
+            else
+                MaterialTheme.colorScheme.primary,
+        ),
+    ) {
+        Icon(Icons.Default.PowerSettingsNew, contentDescription = null, modifier = Modifier.size(22.dp))
+        Spacer(Modifier.width(10.dp))
+        Text(
+            text = if (isRunning || isStarting) "Stop VM" else "Start VM",
+            style = MaterialTheme.typography.titleMedium,
+        )
+    }
+    if (isRunning) {
+        FilledTonalButton(
+            onClick = onRestart,
+            modifier = Modifier.fillMaxWidth().height(48.dp),
+            shape = RoundedCornerShape(16.dp),
+        ) {
+            Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(20.dp))
+            Spacer(Modifier.width(8.dp))
+            Text("Restart VM")
+        }
+    }
+    if (vmState is VmState.Error) {
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(16.dp),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer),
+        ) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                Text(
+                    text = vmState.message,
+                    color = MaterialTheme.colorScheme.onErrorContainer,
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+                Spacer(Modifier.height(12.dp))
+                Button(
+                    onClick = onStart,
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(12.dp),
+                ) {
+                    Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text("Try again")
+                }
             }
+        }
+    }
+    if (isRunning) {
+        FilledTonalButton(
+            onClick = onOpenTerminal,
+            modifier = Modifier.fillMaxWidth().height(56.dp),
+            shape = RoundedCornerShape(16.dp),
+        ) {
+            Icon(Icons.Default.Terminal, contentDescription = null, modifier = Modifier.size(22.dp))
+            Spacer(Modifier.width(10.dp))
+            Text(
+                text = "Open Terminal",
+                style = MaterialTheme.typography.titleMedium,
+            )
         }
     }
 }
