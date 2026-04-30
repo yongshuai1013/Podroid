@@ -574,7 +574,16 @@ class PodroidQemu @Inject constructor(
             args += userQemuExtras.split(Regex("\\s+"))
         }
 
-        return listOf(qemuExe.absolutePath) + args
+        // Wrap QEMU in podroid-launcher when available — it sets PR_SET_PDEATHSIG
+        // so QEMU dies with the app on uninstall/OOM/force-stop instead of leaking
+        // as an orphan under PPID=1. If the launcher is missing (older deploys),
+        // fall back to spawning QEMU directly.
+        val launcher = File(context.applicationInfo.nativeLibraryDir, "libpodroid-launcher.so")
+        return if (launcher.exists()) {
+            listOf(launcher.absolutePath, qemuExe.absolutePath) + args
+        } else {
+            listOf(qemuExe.absolutePath) + args
+        }
     }
 
     private fun ensureStorageImage(storageSizeGb: Int) {

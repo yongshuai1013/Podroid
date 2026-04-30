@@ -144,6 +144,7 @@ build_qemu() {
     docker cp podroid-qemu-extract:/libqemu-system-aarch64.so "$JNILIBS/"
     docker cp podroid-qemu-extract:/libslirp.so               "$JNILIBS/"
     docker cp podroid-qemu-extract:/libpodroid-bridge.so      "$JNILIBS/"
+    docker cp podroid-qemu-extract:/libpodroid-launcher.so    "$JNILIBS/"
     docker cp podroid-qemu-extract:/qemu/efi-virtio.rom        "$ASSETS/qemu/"
     docker cp podroid-qemu-extract:/qemu/keymaps/.             "$ASSETS/qemu/keymaps/"
     docker rm podroid-qemu-extract >/dev/null

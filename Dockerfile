@@ -261,6 +261,10 @@ RUN cd ${QEMU_DIR} && ./configure --cc="${CC}" --cross-prefix="${LLVM}/bin/llvm-
 COPY podroid-bridge.c /tmp/podroid-bridge.c
 RUN ${CC} --sysroot=${LLVM}/sysroot -target aarch64-linux-android28 -fPIE -pie -Wl,-z,max-page-size=16384 /tmp/podroid-bridge.c -o /opt/qemu-out/libpodroid-bridge.so
 
+# Launcher (PR_SET_PDEATHSIG wrapper for QEMU — see podroid-launcher.c)
+COPY podroid-launcher.c /tmp/podroid-launcher.c
+RUN ${CC} --sysroot=${LLVM}/sysroot -target aarch64-linux-android28 -fPIE -pie -Wl,-z,max-page-size=16384 /tmp/podroid-launcher.c -o /opt/qemu-out/libpodroid-launcher.so
+
 # Soname fix
 RUN cp /opt/qemu-out/bin/qemu-system-aarch64 /opt/qemu-out/libqemu-system-aarch64.so \
     && cp /opt/qemu-out/lib/libslirp.so.0 /opt/qemu-out/libslirp.so \
@@ -279,5 +283,6 @@ COPY --from=packer /output/initrd.img /initrd.img
 COPY --from=qemu-builder /opt/qemu-out/libqemu-system-aarch64.so /libqemu-system-aarch64.so
 COPY --from=qemu-builder /opt/qemu-out/libslirp.so /libslirp.so
 COPY --from=qemu-builder /opt/qemu-out/libpodroid-bridge.so /libpodroid-bridge.so
+COPY --from=qemu-builder /opt/qemu-out/libpodroid-launcher.so /libpodroid-launcher.so
 COPY --from=qemu-builder /opt/qemu-out/share/qemu/efi-virtio.rom /qemu/efi-virtio.rom
 COPY --from=qemu-builder /opt/qemu-out/share/qemu/keymaps/ /qemu/keymaps/
