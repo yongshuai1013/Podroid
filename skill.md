@@ -14,7 +14,7 @@
 - **Min SDK:** 28 (Android 9.0)  
 - **Target SDK:** 36
 - **Architecture:** AArch64 only (no x86/x86_64)
-- **Root project name in Gradle:** `VirtuDroid`
+- **Root project name in Gradle:** `Podroid`
 - **GitHub:** https://github.com/ExTV/Podroid
 
 ---
@@ -527,7 +527,7 @@ Serialized as: "tcp:8080:80"
 - **QEMU + bridge packaged as `.so`**: ELF executables renamed to `.so` for APK packaging; `nativeLibraryDir` extraction still works
 - **libslirp soname patched**: `libslirp.so.0` → `libslirp.so` via patchelf (Android linker needs exact match)
 - **libtermux.so custom-built**: Termux prebuilt uses 4KB pages; rebuilt with `-Wl,-z,max-page-size=16384`
-- **Root project name is "VirtuDroid"**: In `settings.gradle.kts`
+- **Root project name is "Podroid"**: In `settings.gradle.kts`
 - **Room declared but unused**: DataStore used instead
 - **Downloads sharing via 9p**: `msize=1048576,cache=loose,noatime` — 128× fewer round-trips vs default 8KB msize
 - **QEMU DNS forwarder (10.0.2.3) unreliable on Android**: init-podroid uses 8.8.8.8 + 1.1.1.1 directly

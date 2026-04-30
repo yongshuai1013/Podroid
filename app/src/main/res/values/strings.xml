@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
   Podroid - Rootless Podman for Android
-  Copyright (C) 2024 Podroid contributors
+  Copyright (C) 2024-2026 Podroid contributors
 -->
 <resources>
     <string name="app_name">Podroid</string>

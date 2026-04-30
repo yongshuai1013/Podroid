@@ -1,6 +1,6 @@
 /*
  * Podroid - Rootless Podman for Android
- * Copyright (C) 2024 Podroid contributors
+ * Copyright (C) 2024-2026 Podroid contributors
  *
  * Minimal QMP (QEMU Machine Protocol) client for runtime VM management.
  * Used for adding/removing port forwards while the VM is running.

@@ -1,6 +1,6 @@
 /*
  * Podroid - Rootless Podman for Android
- * Copyright (C) 2024 Podroid contributors
+ * Copyright (C) 2024-2026 Podroid contributors
  *
  * Foreground service that hosts the QEMU process for Podroid.
  * Holds a WakeLock to prevent the device from sleeping while the VM runs.

@@ -1,6 +1,6 @@
 <!--
   Stop icon used in the foreground service notification action.
-  Copyright (C) 2024 Podroid contributors
+  Copyright (C) 2024-2026 Podroid contributors
 -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="24dp"

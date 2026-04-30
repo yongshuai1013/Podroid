@@ -23,5 +23,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "VirtuDroid"
+rootProject.name = "Podroid"
 include(":app")

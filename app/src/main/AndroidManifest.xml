@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
   Podroid - Rootless Podman for Android
-  Copyright (C) 2024 Podroid contributors
+  Copyright (C) 2024-2026 Podroid contributors
 
   A headless AArch64 QEMU micro-VM running Alpine Linux with Podman,
   exposed via ttyd web terminal.

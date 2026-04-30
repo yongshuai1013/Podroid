@@ -1,6 +1,6 @@
 /*
  * Podroid - Rootless Podman for Android
- * Copyright (C) 2024 Podroid contributors
+ * Copyright (C) 2024-2026 Podroid contributors
  *
  * Tiny shared helper for resolving the device's primary IPv4 address.
  * Used by both PodroidService (when launching QEMU) and the Settings UI

@@ -1,6 +1,6 @@
 /*
  * Podroid - Rootless Podman for Android
- * Copyright (C) 2024 Podroid contributors
+ * Copyright (C) 2024-2026 Podroid contributors
  *
  * Application class — extracts QEMU, kernel, and initrd assets on first run
  * (and on app upgrade when an asset's size changes).
