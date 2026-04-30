@@ -94,6 +94,12 @@ cp /work/files/etc/conf.d/podroid "$ROOTFS/etc/conf.d/"
 cp /work/files/etc/inittab "$ROOTFS/etc/inittab"
 cp /work/files/etc/rc.conf "$ROOTFS/etc/rc.conf"
 
+# /etc/profile.d/*.sh — sourced by Alpine's /etc/profile in login shells.
+# Currently: COLORTERM=truecolor so apps emit 24-bit color sequences.
+mkdir -p "$ROOTFS/etc/profile.d"
+cp /work/files/etc/profile.d/*.sh "$ROOTFS/etc/profile.d/" 2>/dev/null || true
+chmod 0644 "$ROOTFS/etc/profile.d/"*.sh 2>/dev/null || true
+
 # Hostname (read by podroid-bootstrap via `hostname -F /etc/hostname`)
 echo "podroid" > "$ROOTFS/etc/hostname"
 echo "127.0.0.1 localhost podroid" > "$ROOTFS/etc/hosts"
