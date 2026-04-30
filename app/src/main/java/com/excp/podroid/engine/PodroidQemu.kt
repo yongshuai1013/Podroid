@@ -1,6 +1,6 @@
 /*
  * Podroid - Rootless Podman for Android
- * Copyright (C) 2024 Podroid contributors
+ * Copyright (C) 2024-2026 Podroid contributors
  *
  * QEMU engine for Podroid. Manages the VM lifecycle and exposes three Unix
  * sockets for the terminal layer:
@@ -108,7 +108,9 @@ class PodroidQemu @Inject constructor(
         override fun onBell(s: TerminalSession) { sessionClientDelegate?.onBell(s) }
         override fun onColorsChanged(s: TerminalSession) { sessionClientDelegate?.onColorsChanged(s) }
         override fun onTerminalCursorStateChange(state: Boolean) { sessionClientDelegate?.onTerminalCursorStateChange(state) }
+        override fun setTerminalShellPid(s: TerminalSession, pid: Int) { sessionClientDelegate?.setTerminalShellPid(s, pid) }
         override fun getTerminalCursorStyle(): Int = sessionClientDelegate?.terminalCursorStyle ?: 0
+        override fun getTerminalVersionString(): String? = sessionClientDelegate?.terminalVersionString
         override fun logError(tag: String?, msg: String?) = LogProxy.error(tag, TAG, msg)
         override fun logWarn(tag: String?, msg: String?) = LogProxy.warn(tag, TAG, msg)
         override fun logInfo(tag: String?, msg: String?) = LogProxy.info(tag, TAG, msg)
@@ -156,7 +158,8 @@ class PodroidQemu @Inject constructor(
                 2000,
                 proxySessionClient,
             )
-            sess.updateSize(80, 24)
+            // Cell pixel dims default to 0 — TerminalView.updateSize() pushes real values once measured.
+        sess.updateSize(80, 24, 0, 0)
             _terminalSession = sess
             Log.d(TAG, "Bridge auto-started on terminal.sock")
         }
@@ -186,7 +189,8 @@ class PodroidQemu @Inject constructor(
             proxySessionClient,
         )
 
-        sess.updateSize(80, 24)
+        // Cell pixel dims default to 0 — TerminalView.updateSize() pushes real values once measured.
+        sess.updateSize(80, 24, 0, 0)
 
         _terminalSession = sess
         Log.d(TAG, "Terminal session created in Qemu singleton")
@@ -540,7 +544,7 @@ class PodroidQemu @Inject constructor(
             // xattrs on the host file instead of being applied directly.
             // Falls back gracefully on filesystems without xattr support.
             args += "-fsdev"
-            args += "local,id=fsdev0,path=${downloadsDir.absolutePath},security_model=mapped-xattr"
+            args += "local,id=fsdev0,path=${downloadsDir.absolutePath},security_model=none"
             args += "-device"
             args += "virtio-9p-pci,fsdev=fsdev0,mount_tag=downloads"
         }

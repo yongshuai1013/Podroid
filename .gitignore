@@ -1,6 +1,8 @@
 # Build outputs
 /build/
 /app/build/
+/terminal-emulator/build/
+/terminal-view/build/
 *.apk
 *.aab
 

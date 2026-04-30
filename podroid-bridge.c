@@ -153,7 +153,10 @@ int main(int argc, char *argv[]) {
     signal(SIGTERM,  on_term);
     signal(SIGPIPE,  SIG_IGN);
 
-    char buf[8192];
+    /* 64 KB matches the sixel4 fork's main-thread PTY drain buffer and the new
+     * 64 KB reader on the TerminalSession side — fewer syscalls for chunked
+     * VM output (large `cat`, btop redraws, sixel images). */
+    char buf[65536];
 
     for (;;) {
         if (g_shutdown) break;

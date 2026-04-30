@@ -83,9 +83,6 @@ android {
         // It must be extracted to disk so ProcessBuilder can execute it.
         jniLibs {
             useLegacyPackaging = true
-            // libtermux.so is rebuilt locally with 16KB page alignment (see build-termux-android.sh).
-            // pickFirsts makes Gradle prefer src/main/jniLibs/ over the copy inside the Termux AAR.
-            pickFirsts += "lib/arm64-v8a/libtermux.so"
         }
     }
 }
@@ -123,9 +120,9 @@ dependencies {
     // DataStore (app settings)
     implementation(libs.androidx.datastore.preferences)
 
-    // Termux terminal emulator & view
-    implementation(libs.termux.terminal.emulator)
-    implementation(libs.termux.terminal.view)
+    // Vendored Termux terminal emulator & view (MatanZ/termux-app:sixel4 — Sixel + iTerm2 image support)
+    implementation(project(":terminal-emulator"))
+    implementation(project(":terminal-view"))
 
     // Testing
     testImplementation(libs.junit)
