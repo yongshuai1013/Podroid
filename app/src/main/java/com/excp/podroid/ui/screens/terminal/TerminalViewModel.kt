@@ -1,6 +1,6 @@
 /*
  * Podroid - Rootless Podman for Android
- * Copyright (C) 2024 Podroid contributors
+ * Copyright (C) 2024-2026 Podroid contributors
  *
  * Terminal ViewModel — wires TerminalView to the podroid-bridge binary.
  *
@@ -50,8 +50,10 @@ import com.termux.view.TerminalView
 import com.termux.view.TerminalViewClient
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.stateIn
 import java.io.File
@@ -129,18 +131,43 @@ class TerminalViewModel @Inject constructor(
     }
 
     /**
+     * Peek a theme's bg+fg ARGB ints without mutating the active palette.
+     * Used by the Settings sheet to render theme preview swatches.
+     * Returns null for `default` (caller falls back to neutral colors).
+     */
+    fun peekThemeColors(theme: String): Pair<Int, Int>? {
+        if (theme == "default") return null
+        val props = readThemeProperties(theme) ?: return null
+        val bg = (props["background"] as? String)?.let { parseColor(it) } ?: return null
+        val fg = (props["foreground"] as? String)?.let { parseColor(it) } ?: 0xFFE0E0E0.toInt()
+        return bg to fg
+    }
+
+    /**
      * Resolve a theme name to the (background, Properties) pair, also pushing
      * the palette into TerminalColors.COLOR_SCHEME so the renderer picks it up.
      * Returns null background for the built-in default.
      */
-    fun loadColorTheme(theme: String): Int? = if (theme == "default") {
-        null
-    } else try {
-        val props = java.util.Properties()
-        context.assets.open("colors/$theme.properties").use { props.load(it) }
+    fun loadColorTheme(theme: String): Int? {
+        if (theme == "default") return null
+        val props = readThemeProperties(theme) ?: return null
         TerminalColors.COLOR_SCHEME.updateWith(props)
-        (props["background"] as? String)?.let { parseColor(it) }
-    } catch (_: Exception) { null }
+        return (props["background"] as? String)?.let { parseColor(it) }
+    }
+
+    /** User dir wins over bundled when names collide. */
+    private fun readThemeProperties(theme: String): java.util.Properties? {
+        val props = java.util.Properties()
+        val userFile = java.io.File(userThemesDir, "$theme.properties")
+        return try {
+            if (userFile.isFile) {
+                userFile.inputStream().use { props.load(it) }
+            } else {
+                context.assets.open("colors/$theme.properties").use { props.load(it) }
+            }
+            props
+        } catch (_: Exception) { null }
+    }
 
     /** Lists asset files in `dir` whose name ends with `suffix`, with the suffix stripped. */
     fun listAssetNames(dir: String, suffix: String): List<String> {
@@ -150,21 +177,250 @@ class TerminalViewModel @Inject constructor(
         return listOf("default") + items.filter { it.endsWith(suffix) }.map { it.removeSuffix(suffix) }.sorted()
     }
 
-    /** Resolve a font name to a Typeface. Returns Typeface.MONOSPACE for default or on error. */
-    fun loadFont(font: String): Typeface = if (font == "default") {
-        Typeface.MONOSPACE
-    } else try {
-        // assets.openFd is a file descriptor — Typeface.createFromFile needs a real path,
-        // so we copy on demand into a per-launch cache file. Same disk hit as before but
-        // no DataStore-shadowed state on filesDir.
-        val cacheFile = java.io.File(context.cacheDir, "font_$font.ttf")
-        if (!cacheFile.exists()) {
-            context.assets.open("fonts/$font.ttf").use { inp ->
-                cacheFile.outputStream().use { out -> inp.copyTo(out) }
+    /**
+     * Where user-imported fonts live. App-private external dir means no permission
+     * prompts and a clean uninstall, but it's not visible to third-party file
+     * managers on Android 11+ — so we drive imports via SAF (`importCustomFont`)
+     * rather than asking users to "drop a .ttf into a folder".
+     */
+    private val userFontsDir: java.io.File by lazy {
+        java.io.File(context.getExternalFilesDir(null), "fonts").apply { mkdirs() }
+    }
+
+    /** Where user-imported themes live. Same rationale as userFontsDir. */
+    private val userThemesDir: java.io.File by lazy {
+        java.io.File(context.getExternalFilesDir(null), "colors").apply { mkdirs() }
+    }
+
+    /** Bundled .properties themes ∪ user-imported. */
+    fun listAvailableThemes(): List<String> {
+        val bundled = runCatching { context.assets.list("colors")?.toList() }
+            .getOrNull().orEmpty()
+        val user = (userThemesDir.listFiles() ?: emptyArray())
+            .filter { it.isFile }.map { it.name }
+        val names = (bundled + user)
+            .filter { it.endsWith(".properties", ignoreCase = true) }
+            .map { it.substringBeforeLast('.') }
+            .toSortedSet(String.CASE_INSENSITIVE_ORDER)
+        return listOf("default") + names.toList()
+    }
+
+    fun isCustomTheme(name: String): Boolean =
+        java.io.File(userThemesDir, "$name.properties").isFile
+
+    fun deleteCustomTheme(name: String): Boolean {
+        val f = java.io.File(userThemesDir, "$name.properties")
+        return f.exists() && f.delete()
+    }
+
+    /**
+     * Import a theme from a terminalcolors.com URL.
+     * Accepts pages like `https://terminalcolors.com/themes/dracula/default/` —
+     * we transform the slug into the predictable Alacritty TOML download URL,
+     * fetch it, and convert to our `.properties` format.
+     *
+     * Returns the saved theme name, or null on any failure.
+     */
+    suspend fun importThemeFromUrl(input: String): String? = withContext(Dispatchers.IO) {
+        val url = input.trim()
+        // Extract slug from the page URL or accept the .toml URL directly.
+        val tomlUrl: String = when {
+            url.endsWith(".toml") -> url
+            else -> {
+                val match = Regex("""terminalcolors\.com/themes/([^/]+)/([^/?#]+)""").find(url)
+                    ?: return@withContext null
+                val (name, variant) = match.groupValues[1] to match.groupValues[2]
+                "https://terminalcolors.com/downloads/alacritty/$name-$variant.toml"
             }
         }
-        Typeface.createFromFile(cacheFile)
-    } catch (_: Exception) { Typeface.MONOSPACE }
+        val toml = runCatching {
+            val conn = (java.net.URL(tomlUrl).openConnection() as java.net.HttpURLConnection).apply {
+                connectTimeout = 8000
+                readTimeout = 8000
+                setRequestProperty(
+                    "User-Agent",
+                    "Podroid/${com.excp.podroid.BuildConfig.VERSION_NAME}"
+                )
+            }
+            try {
+                if (conn.responseCode != 200) return@runCatching null
+                conn.inputStream.bufferedReader().readText()
+            } finally { conn.disconnect() }
+        }.getOrNull() ?: return@withContext null
+
+        val themeName = sanitizeFontName(
+            tomlUrl.substringAfterLast('/').substringBeforeLast('.')
+        ) ?: return@withContext null
+
+        val properties = parseAlacrittyToml(toml) ?: return@withContext null
+
+        val dest = java.io.File(userThemesDir, "$themeName.properties")
+        dest.bufferedWriter().use { w ->
+            for ((k, v) in properties) w.write("$k=$v\n")
+        }
+        themeName
+    }
+
+    /**
+     * Parse an Alacritty TOML color export into our `.properties` keys.
+     * Returns null if required keys (background/foreground/16 ANSI colors) aren't found.
+     */
+    private fun parseAlacrittyToml(toml: String): Map<String, String>? {
+        // [colors.<section>] key = "#xxxxxx"
+        val sectionRe = Regex("""\[colors\.(\w+)]""")
+        val kvRe = Regex("""(\w+)\s*=\s*"(#[0-9a-fA-F]{3,8})"""")
+        var section = ""
+        val byKey = LinkedHashMap<String, String>()
+        for (raw in toml.lines()) {
+            val line = raw.trim()
+            sectionRe.find(line)?.let { section = it.groupValues[1]; return@let }
+            val kv = kvRe.find(line) ?: continue
+            val key = kv.groupValues[1]
+            val value = kv.groupValues[2]
+            val mapped = when (section) {
+                "primary" -> when (key) {
+                    "foreground" -> "foreground"
+                    "background" -> "background"
+                    else -> null
+                }
+                "cursor" -> when (key) {
+                    "cursor" -> "cursor"
+                    "text" -> null   // foreground-of-cursor — emulator doesn't store separately
+                    else -> null
+                }
+                "normal" -> when (key) {
+                    "black"   -> "color0"; "red"     -> "color1"
+                    "green"   -> "color2"; "yellow"  -> "color3"
+                    "blue"    -> "color4"; "magenta" -> "color5"
+                    "cyan"    -> "color6"; "white"   -> "color7"
+                    else -> null
+                }
+                "bright" -> when (key) {
+                    "black"   -> "color8";  "red"     -> "color9"
+                    "green"   -> "color10"; "yellow"  -> "color11"
+                    "blue"    -> "color12"; "magenta" -> "color13"
+                    "cyan"    -> "color14"; "white"   -> "color15"
+                    else -> null
+                }
+                else -> null
+            } ?: continue
+            byKey[mapped] = value
+        }
+        // Sanity: must have FG + BG and at least 8 ANSI colors.
+        if (!byKey.containsKey("foreground") || !byKey.containsKey("background")) return null
+        if ((0..7).any { !byKey.containsKey("color$it") }) return null
+        return byKey
+    }
+
+    /** Bundled assets ∪ user-imported TTFs (case-insensitive dedupe — user wins). */
+    fun listAvailableFonts(): List<String> {
+        val bundled = runCatching { context.assets.list("fonts")?.toList() }
+            .getOrNull().orEmpty()
+        val user = (userFontsDir.listFiles() ?: emptyArray())
+            .filter { it.isFile }.map { it.name }
+        val names = (bundled + user)
+            .filter { it.endsWith(".ttf", ignoreCase = true) }
+            .map { it.substringBeforeLast('.') }
+            .toSortedSet(String.CASE_INSENSITIVE_ORDER)
+        return listOf("default") + names.toList()
+    }
+
+    /** True if `name` was imported by the user (overrides any bundled font of the same name). */
+    fun isCustomFont(name: String): Boolean =
+        java.io.File(userFontsDir, "$name.ttf").isFile
+
+    /** Resolve a font name to a Typeface. Returns Typeface.MONOSPACE for default or on error. */
+    fun loadFont(font: String): Typeface {
+        if (font == "default") return Typeface.MONOSPACE
+        // User imports win over bundled with the same name.
+        val userFile = java.io.File(userFontsDir, "$font.ttf")
+        if (userFile.isFile) {
+            return runCatching { Typeface.createFromFile(userFile) }
+                .getOrDefault(Typeface.MONOSPACE)
+        }
+        return try {
+            // assets.openFd is a file descriptor — Typeface.createFromFile needs a real path,
+            // so we copy on demand into a per-launch cache file.
+            val cacheFile = java.io.File(context.cacheDir, "font_$font.ttf")
+            if (!cacheFile.exists()) {
+                context.assets.open("fonts/$font.ttf").use { inp ->
+                    cacheFile.outputStream().use { out -> inp.copyTo(out) }
+                }
+            }
+            Typeface.createFromFile(cacheFile)
+        } catch (_: Exception) { Typeface.MONOSPACE }
+    }
+
+    /**
+     * Import a `.ttf` from a SAF `Uri` into the user fonts dir.
+     * Returns the sanitized font name (no extension) on success, null on failure.
+     *
+     * Safety:
+     * - Filename sanitized to ASCII alnum + dash/underscore (max 48 chars).
+     * - Capped at 16 MiB; legitimate TTFs are well under 1 MB.
+     * - Validates by constructing a Typeface; rejects unloadable files.
+     * - Writes to `.tmp` then renames so a partial copy never wins picker enumeration.
+     */
+    fun importCustomFont(uri: android.net.Uri): String? {
+        val rawName = displayNameOf(uri) ?: return null
+        val name = sanitizeFontName(rawName) ?: return null
+        val tmp = java.io.File(userFontsDir, "$name.ttf.tmp")
+        val dest = java.io.File(userFontsDir, "$name.ttf")
+        return try {
+            context.contentResolver.openInputStream(uri).use { input ->
+                if (input == null) return null
+                tmp.outputStream().use { out ->
+                    val maxBytes = 16L * 1024 * 1024
+                    val buf = ByteArray(8192)
+                    var written = 0L
+                    while (true) {
+                        val n = input.read(buf)
+                        if (n <= 0) break
+                        written += n
+                        if (written > maxBytes) return cleanup(tmp, null)
+                        out.write(buf, 0, n)
+                    }
+                }
+            }
+            // Validate by trying to load it.
+            val tf = runCatching { Typeface.createFromFile(tmp) }.getOrNull()
+            if (tf == null || tf === Typeface.DEFAULT) return cleanup(tmp, null)
+            // Atomic-ish swap.
+            if (dest.exists()) dest.delete()
+            if (!tmp.renameTo(dest)) return cleanup(tmp, null)
+            // Invalidate the asset-cache copy in case a bundled font of the same
+            // name was previously loaded — next loadFont() should see the new file.
+            java.io.File(context.cacheDir, "font_$name.ttf").delete()
+            name
+        } catch (_: Exception) {
+            cleanup(tmp, null)
+        }
+    }
+
+    /** Remove a previously-imported custom font. Returns true if it existed and was removed. */
+    fun deleteCustomFont(name: String): Boolean {
+        val f = java.io.File(userFontsDir, "$name.ttf")
+        val ok = f.exists() && f.delete()
+        if (ok) java.io.File(context.cacheDir, "font_$name.ttf").delete()
+        return ok
+    }
+
+    private fun <T> cleanup(tmp: java.io.File, result: T?): T? {
+        runCatching { if (tmp.exists()) tmp.delete() }
+        return result
+    }
+
+    private fun displayNameOf(uri: android.net.Uri): String? = runCatching {
+        context.contentResolver.query(
+            uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null
+        )?.use { if (it.moveToFirst()) it.getString(0) else null }
+    }.getOrNull()
+
+    private fun sanitizeFontName(filename: String): String? {
+        val base = filename.substringBeforeLast('.').trim()
+        val safe = base.replace(Regex("[^A-Za-z0-9_-]"), "-").trim('-').take(48)
+        return safe.takeIf { it.isNotEmpty() }
+    }
 
     private fun parseColor(hex: String): Int {
         val clean = hex.removePrefix("#")
@@ -238,7 +494,10 @@ class TerminalViewModel @Inject constructor(
         }
         override fun onColorsChanged(session: TerminalSession) {}
         override fun onTerminalCursorStateChange(state: Boolean) {}
+        override fun setTerminalShellPid(session: TerminalSession, pid: Int) {}
         override fun getTerminalCursorStyle(): Int = 0
+        override fun getTerminalVersionString(): String =
+            "Podroid ${com.excp.podroid.BuildConfig.VERSION_NAME}"
         override fun logError(tag: String?, message: String?) = LogProxy.error(tag, TAG, message)
         override fun logWarn(tag: String?, message: String?) = LogProxy.warn(tag, TAG, message)
         override fun logInfo(tag: String?, message: String?) = LogProxy.info(tag, TAG, message)
@@ -253,6 +512,18 @@ class TerminalViewModel @Inject constructor(
         override fun onScale(scale: Float): Float = scale
         override fun onSingleTapUp(e: MotionEvent?) {
             val view = viewRef?.get() ?: return
+            // OSC 8: tap on a hyperlinked region launches the URL instead of the keyboard.
+            if (e != null) {
+                val url = view.getHyperlinkAt(e.x, e.y)
+                if (!url.isNullOrEmpty()) {
+                    runCatching {
+                        val intent = android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse(url))
+                            .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                        context.startActivity(intent)
+                    }
+                    return
+                }
+            }
             val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE)
                 as android.view.inputmethod.InputMethodManager
             imm.showSoftInput(view, 0)
@@ -398,7 +669,7 @@ class TerminalViewModel @Inject constructor(
         val cols = (w / charWidth).toInt().coerceAtLeast(20)
         val rows = (h / lineHeight).toInt().coerceAtLeast(8)
         Log.d(TAG, "forceUpdateSize: view=${w}x${h}px cell=${charWidth}x${lineHeight}px → ${cols}x${rows} chars")
-        sess.updateSize(cols, rows)
+        sess.updateSize(cols, rows, charWidth.toInt(), lineHeight.toInt())
     }
 
     /**

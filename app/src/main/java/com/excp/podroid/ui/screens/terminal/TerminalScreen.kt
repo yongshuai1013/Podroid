@@ -2,8 +2,10 @@ package com.excp.podroid.ui.screens.terminal
 
 import android.app.Activity
 import android.view.WindowManager
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.PaddingValues
@@ -17,6 +19,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -30,21 +33,43 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.FilterChip
-import androidx.compose.material3.FilterChipDefaults
-import androidx.compose.material3.HorizontalDivider
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.FilterChipDefaults
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Slider
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.material3.windowsizeclass.WindowSizeClass
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Search
+import androidx.compose.foundation.border
+import androidx.compose.foundation.layout.BoxScope
+import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.wrapContentSize
+import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.ui.graphics.toArgb
+import androidx.compose.foundation.text.BasicText
+import androidx.compose.runtime.derivedStateOf
+import androidx.compose.runtime.LaunchedEffect as ComposeLaunchedEffect
+import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.TextUnit
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.waitForUpOrCancellation
@@ -67,6 +92,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.draw.scale
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.BlendMode
@@ -444,6 +470,11 @@ private fun KeyButton(
     )
 }
 
+/**
+ * Quick Settings — minimal top-anchored sheet. Shows a few items per section
+ * with "More" buttons that open full pickers (with search) on demand.
+ */
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 private fun QuickSettingsDialog(
     fontSize: Int,
@@ -459,119 +490,600 @@ private fun QuickSettingsDialog(
     onFontChange: (String) -> Unit,
     viewModel: TerminalViewModel = hiltViewModel(),
 ) {
-    val themes = remember { viewModel.listAssetNames("colors", ".properties") }
-    val fonts = remember { viewModel.listAssetNames("fonts", ".ttf") }
-    val fontSizes = listOf(12, 14, 16, 18, 20, 22, 24, 28, 32)
+    var bump by remember { mutableStateOf(0) }
+    val themes = remember(bump) { viewModel.listAvailableThemes() }
+    val fonts = remember(bump) { viewModel.listAvailableFonts() }
 
-    val scrollState = rememberScrollState()
-    val scrollbarColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.55f)
-    val scrollTrackColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f)
+    // SAF for fonts.
+    val fontImport = androidx.activity.compose.rememberLauncherForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri != null) {
+            val name = viewModel.importCustomFont(uri)
+            if (name != null) { onFontChange(name); bump++ }
+        }
+    }
+    val fontMimes = remember { arrayOf("font/ttf", "application/x-font-ttf", "application/octet-stream") }
 
-    AlertDialog(
+    // Sub-dialogs.
+    var showThemePicker by remember { mutableStateOf(false) }
+    var showFontPicker by remember { mutableStateOf(false) }
+    var showThemeImport by remember { mutableStateOf(false) }
+    var fontToDelete by remember { mutableStateOf<String?>(null) }
+    var themeToDelete by remember { mutableStateOf<String?>(null) }
+
+    if (showThemePicker) {
+        FullPickerDialog(
+            title = "Color themes",
+            items = themes,
+            selected = colorTheme,
+            onPick = { onColorThemeChange(it); showThemePicker = false },
+            onDismiss = { showThemePicker = false },
+            isCustom = { viewModel.isCustomTheme(it) },
+            onLongPressCustom = { themeToDelete = it },
+            renderChip = { name, selected, onClick, onLongClick ->
+                ThemeSwatch(name, selected, onClick, onLongClick, viewModel)
+            },
+            extraTrailingChip = {
+                AddSwatch(label = "Import",
+                    subLabel = "Paste URL",
+                    onClick = { showThemeImport = true })
+            },
+        )
+    }
+
+    if (showFontPicker) {
+        FullPickerDialog(
+            title = "Fonts",
+            items = fonts,
+            selected = terminalFont,
+            onPick = { onFontChange(it); showFontPicker = false },
+            onDismiss = { showFontPicker = false },
+            isCustom = { viewModel.isCustomFont(it) },
+            onLongPressCustom = { fontToDelete = it },
+            renderChip = { name, selected, onClick, onLongClick ->
+                FontSwatch(
+                    name, viewModel.isCustomFont(name), selected, onClick, onLongClick, viewModel,
+                )
+            },
+            extraTrailingChip = {
+                AddSwatch(label = "+ Add", subLabel = ".ttf", onClick = { fontImport.launch(fontMimes) })
+            },
+        )
+    }
+
+    if (showThemeImport) {
+        ThemeImportDialog(
+            onDismiss = { showThemeImport = false },
+            onImported = { name ->
+                onColorThemeChange(name)
+                bump++
+                showThemeImport = false
+            },
+            viewModel = viewModel,
+        )
+    }
+
+    fontToDelete?.let { name ->
+        AlertDialog(
+            onDismissRequest = { fontToDelete = null },
+            title = { Text("Remove font?") },
+            text = { Text("\"${prettyName(name)}\" will be deleted.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    if (viewModel.deleteCustomFont(name)) {
+                        if (terminalFont == name) onFontChange("default")
+                        bump++
+                    }
+                    fontToDelete = null
+                }) { Text("Delete") }
+            },
+            dismissButton = { TextButton(onClick = { fontToDelete = null }) { Text("Cancel") } },
+        )
+    }
+    themeToDelete?.let { name ->
+        AlertDialog(
+            onDismissRequest = { themeToDelete = null },
+            title = { Text("Remove theme?") },
+            text = { Text("\"${prettyName(name)}\" will be deleted.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    if (viewModel.deleteCustomTheme(name)) {
+                        if (colorTheme == name) onColorThemeChange("default")
+                        bump++
+                    }
+                    themeToDelete = null
+                }) { Text("Delete") }
+            },
+            dismissButton = { TextButton(onClick = { themeToDelete = null }) { Text("Cancel") } },
+        )
+    }
+
+    // Top sheet.
+    androidx.compose.ui.window.Dialog(
         onDismissRequest = onDismiss,
-        title = { Text("Quick Settings") },
-        text = {
-            Box(
-                modifier = Modifier.verticalScrollbar(
-                    state = scrollState,
-                    thumbColor = scrollbarColor,
-                    trackColor = scrollTrackColor,
-                ),
-            ) {
-            Column(
+        properties = androidx.compose.ui.window.DialogProperties(
+            usePlatformDefaultWidth = false,
+            dismissOnBackPress = true,
+            dismissOnClickOutside = true,
+        ),
+    ) {
+        Box(modifier = Modifier.fillMaxSize()) {
+            // Cap sheet height at ~92% of the screen so it can never push toggles
+            // off the visible area in landscape (where height ≈ 360dp). The inner
+            // Column is scrollable so any overflow becomes a swipe instead of a clip.
+            val configuration = LocalConfiguration.current
+            val maxSheetHeight = (configuration.screenHeightDp * 0.92f).dp
+            androidx.compose.material3.Surface(
                 modifier = Modifier
-                    .verticalScroll(scrollState)
-                    .padding(start = 10.dp),
-                verticalArrangement = Arrangement.spacedBy(20.dp),
+                    .align(Alignment.TopCenter)
+                    .fillMaxWidth()
+                    .heightIn(max = maxSheetHeight),
+                shape = RoundedCornerShape(bottomStart = 24.dp, bottomEnd = 24.dp),
+                color = MaterialTheme.colorScheme.surface,
+                tonalElevation = 4.dp,
             ) {
-                // ── Font size ──────────────────────────────────────
-                val sizeIdx = fontSizes.indexOf(fontSize).coerceAtLeast(0)
-                val sizeListState = rememberLazyListState(sizeIdx)
-                QuickSettingsRow(label = "Font size", value = "$fontSize sp") {
-                    LazyRow(
-                        state = sizeListState,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        contentPadding = PaddingValues(horizontal = 4.dp),
-                        modifier = Modifier.fadingEdges(sizeListState),
-                    ) {
-                        items(fontSizes.size) { i ->
-                            val sz = fontSizes[i]
-                            QuickChip(
-                                label = "$sz",
-                                selected = sz == fontSize,
-                                onClick = { onFontSizeChange(sz) },
-                            )
-                        }
-                    }
-                }
-
-                // ── Color theme ────────────────────────────────────
-                val themeIdx = themes.indexOf(colorTheme).coerceAtLeast(0)
-                val themeListState = rememberLazyListState(themeIdx)
-                QuickSettingsRow(label = "Color theme", value = prettyName(colorTheme)) {
-                    LazyRow(
-                        state = themeListState,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        contentPadding = PaddingValues(horizontal = 4.dp),
-                        modifier = Modifier.fadingEdges(themeListState),
-                    ) {
-                        items(themes.size) { i ->
-                            val t = themes[i]
-                            QuickChip(
-                                label = prettyName(t),
-                                selected = t == colorTheme,
-                                onClick = { onColorThemeChange(t) },
-                            )
-                        }
-                    }
-                }
-
-                // ── Font family ────────────────────────────────────
-                val fontIdx = fonts.indexOf(terminalFont).coerceAtLeast(0)
-                val fontListState = rememberLazyListState(fontIdx)
-                QuickSettingsRow(label = "Font family", value = prettyName(terminalFont)) {
-                    LazyRow(
-                        state = fontListState,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        contentPadding = PaddingValues(horizontal = 4.dp),
-                        modifier = Modifier.fadingEdges(fontListState),
-                    ) {
-                        items(fonts.size) { i ->
-                            val f = fonts[i]
-                            QuickChip(
-                                label = prettyName(f),
-                                selected = f == terminalFont,
-                                onClick = { onFontChange(f) },
-                            )
-                        }
-                    }
-                }
-
-                HorizontalDivider()
-
-                // ── Switches ───────────────────────────────────────
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .verticalScroll(rememberScrollState())
+                        .padding(horizontal = 16.dp)
+                        .padding(top = 6.dp, bottom = 12.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    Text("Show extra keys", style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
-                    Switch(checked = showExtraKeys, onCheckedChange = onToggleExtraKeys)
-                }
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Text("Haptic feedback", style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
-                    Switch(checked = hapticsEnabled, onCheckedChange = onToggleHaptics)
+                    // Drag handle
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(bottom = 4.dp),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(width = 36.dp, height = 4.dp)
+                                .clip(RoundedCornerShape(2.dp))
+                                .background(MaterialTheme.colorScheme.outlineVariant),
+                        )
+                    }
+
+                    // Compact header
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            "Settings",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.SemiBold,
+                            modifier = Modifier.weight(1f),
+                        )
+                        IconButton(onClick = onDismiss, modifier = Modifier.size(36.dp)) {
+                            Icon(Icons.Default.Close, contentDescription = "Close")
+                        }
+                    }
+
+                    // Font size — continuous slider, rounded in callback (no visible ticks)
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Text("Size",
+                            style = MaterialTheme.typography.labelLarge,
+                            modifier = Modifier.width(56.dp))
+                        Slider(
+                            value = fontSize.toFloat(),
+                            onValueChange = { v ->
+                                val rounded = v.toInt()
+                                if (rounded != fontSize) onFontSizeChange(rounded)
+                            },
+                            valueRange = 10f..36f,
+                            modifier = Modifier.weight(1f),
+                        )
+                        Text(
+                            "$fontSize",
+                            style = MaterialTheme.typography.labelLarge,
+                            color = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.width(36.dp),
+                            textAlign = TextAlign.End,
+                        )
+                    }
+
+                    // Theme strip — 4 chips + More + Import-by-URL
+                    QuickStripRow(
+                        label = "Theme",
+                        selectedName = prettyName(colorTheme),
+                        items = themes,
+                        selected = colorTheme,
+                        onSelect = onColorThemeChange,
+                        onMore = { showThemePicker = true },
+                        onImport = { showThemeImport = true },
+                        importLabel = "URL",
+                    ) { name, sel, click ->
+                        ThemeSwatch(name, sel, click, null, viewModel)
+                    }
+
+                    // Font strip — 4 chips + More + Import .ttf
+                    QuickStripRow(
+                        label = "Font",
+                        selectedName = prettyName(terminalFont),
+                        items = fonts,
+                        selected = terminalFont,
+                        onSelect = onFontChange,
+                        onMore = { showFontPicker = true },
+                        onImport = { fontImport.launch(fontMimes) },
+                        importLabel = ".ttf",
+                    ) { name, sel, click ->
+                        FontSwatch(name, viewModel.isCustomFont(name), sel, click, null, viewModel)
+                    }
+
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant,
+                        modifier = Modifier.padding(vertical = 4.dp))
+
+                    // Toggles — single line each, no subtitles
+                    CompactToggle("Extra keys", showExtraKeys, onToggleExtraKeys)
+                    CompactToggle("Haptics", hapticsEnabled, onToggleHaptics)
                 }
             }
+        }
+    }
+}
+
+/**
+ * Compact strip: label + selected name + 4 preview chips + [More] [+ Import].
+ * The selected item is pinned first, then up to 3 alphabetical neighbors.
+ */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun QuickStripRow(
+    label: String,
+    selectedName: String,
+    items: List<String>,
+    selected: String,
+    onSelect: (String) -> Unit,
+    onMore: () -> Unit,
+    onImport: () -> Unit,
+    importLabel: String,
+    chip: @Composable (name: String, selected: Boolean, onClick: () -> Unit) -> Unit,
+) {
+    val visible = remember(items, selected) {
+        val sel = if (selected in items) selected else items.firstOrNull()
+        if (sel == null) emptyList()
+        else listOf(sel) + items.filter { it != sel }.take(3)
+    }
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(label, style = MaterialTheme.typography.labelLarge,
+                modifier = Modifier.width(56.dp))
+            Text(selectedName,
+                style = MaterialTheme.typography.labelLarge,
+                color = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.weight(1f),
+                maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
+        FlowRow(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            visible.forEach { name ->
+                chip(name, name == selected) { onSelect(name) }
+            }
+            AddSwatch(label = "More", subLabel = "${items.size}", onClick = onMore)
+            AddSwatch(label = "+ Add", subLabel = importLabel, onClick = onImport)
+        }
+    }
+}
+
+/**
+ * Theme preview chip — painted in the theme's actual background color so the
+ * user sees the look at a glance. Foreground color is the theme's foreground.
+ * If the theme can't be parsed we fall back to neutral colors.
+ */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun ThemeSwatch(
+    name: String,
+    selected: Boolean,
+    onClick: () -> Unit,
+    onLongClick: (() -> Unit)?,
+    viewModel: TerminalViewModel,
+) {
+    val colors = remember(name) {
+        viewModel.peekThemeColors(name) ?: (0xFF101010.toInt() to 0xFFE0E0E0.toInt())
+    }
+    SwatchBox(
+        selected = selected,
+        onClick = onClick,
+        onLongClick = onLongClick,
+        backgroundColor = Color(colors.first),
+    ) {
+        Text(
+            prettyName(name),
+            color = Color(colors.second),
+            style = MaterialTheme.typography.labelMedium,
+            fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+            textAlign = TextAlign.Center,
+        )
+    }
+}
+
+/**
+ * Font preview chip — shows "Aa" rendered in the actual font, plus the name.
+ * Custom (user-imported) fonts get a "•" suffix and a long-press → delete.
+ */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun FontSwatch(
+    name: String,
+    isCustom: Boolean,
+    selected: Boolean,
+    onClick: () -> Unit,
+    onLongClick: (() -> Unit)?,
+    viewModel: TerminalViewModel,
+) {
+    val typeface = remember(name) { viewModel.loadFont(name) }
+    val previewColor = MaterialTheme.colorScheme.onSurface.toArgb()
+    SwatchBox(
+        selected = selected,
+        onClick = onClick,
+        onLongClick = onLongClick,
+        backgroundColor = MaterialTheme.colorScheme.surfaceContainerHighest,
+    ) {
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center,
+        ) {
+            // "Aa" in the actual typeface — uses AndroidView for direct Typeface support.
+            androidx.compose.ui.viewinterop.AndroidView(
+                factory = { ctx ->
+                    android.widget.TextView(ctx).apply {
+                        text = "Aa"
+                        textSize = 18f
+                        gravity = android.view.Gravity.CENTER
+                        includeFontPadding = false
+                    }
+                },
+                update = { tv ->
+                    tv.typeface = typeface
+                    tv.setTextColor(previewColor)
+                },
+            )
+            Text(
+                if (isCustom) "${prettyName(name)} •" else prettyName(name),
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurface,
+                fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+    }
+}
+
+/** Generic outline chip used for "More" / "+ Add" / "Import" actions. */
+@Composable
+private fun AddSwatch(
+    label: String,
+    subLabel: String,
+    onClick: () -> Unit,
+) {
+    Box(
+        modifier = Modifier
+            .size(width = 104.dp, height = 76.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .border(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.4f), RoundedCornerShape(12.dp))
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Text(label,
+                style = MaterialTheme.typography.labelLarge,
+                color = MaterialTheme.colorScheme.primary,
+                fontWeight = FontWeight.SemiBold)
+            Text(subLabel,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+    }
+}
+
+@Composable
+private fun CompactToggle(label: String, checked: Boolean, onChange: (Boolean) -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(8.dp))
+            .clickable { onChange(!checked) }
+            .padding(start = 4.dp, end = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(label, style = MaterialTheme.typography.labelLarge,
+            modifier = Modifier.weight(1f))
+        Switch(
+            checked = checked,
+            onCheckedChange = onChange,
+            modifier = Modifier.scale(0.85f),
+        )
+    }
+}
+
+/**
+ * Full-screen picker shown when the user taps "More" — search field + grid of
+ * preview swatches. Long-press a custom item to delete it.
+ */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun FullPickerDialog(
+    title: String,
+    items: List<String>,
+    selected: String,
+    onPick: (String) -> Unit,
+    onDismiss: () -> Unit,
+    isCustom: (String) -> Boolean,
+    onLongPressCustom: (String) -> Unit,
+    renderChip: @Composable (
+        name: String, selected: Boolean,
+        onClick: () -> Unit, onLongClick: (() -> Unit)?,
+    ) -> Unit,
+    extraTrailingChip: @Composable () -> Unit,
+) {
+    var query by remember { mutableStateOf("") }
+    val filtered = remember(items, query) {
+        if (query.isBlank()) items
+        else items.filter { it.contains(query, ignoreCase = true) }
+    }
+    androidx.compose.ui.window.Dialog(
+        onDismissRequest = onDismiss,
+        properties = androidx.compose.ui.window.DialogProperties(
+            usePlatformDefaultWidth = false,
+        ),
+    ) {
+        androidx.compose.material3.Surface(
+            modifier = Modifier
+                .fillMaxWidth()
+                .fillMaxHeight(0.92f)
+                .padding(8.dp),
+            shape = RoundedCornerShape(20.dp),
+            tonalElevation = 6.dp,
+            color = MaterialTheme.colorScheme.surface,
+        ) {
+            Column(modifier = Modifier
+                .fillMaxSize()
+                .padding(horizontal = 16.dp, vertical = 12.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(title, style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.SemiBold,
+                        modifier = Modifier.weight(1f))
+                    IconButton(onClick = onDismiss, modifier = Modifier.size(36.dp)) {
+                        Icon(Icons.Default.Close, contentDescription = "Close")
+                    }
+                }
+                OutlinedTextField(
+                    value = query,
+                    onValueChange = { query = it },
+                    placeholder = { Text("Search ${items.size}") },
+                    leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                Box(modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f)
+                    .verticalScroll(rememberScrollState())) {
+                    FlowRow(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        filtered.forEach { name ->
+                            val custom = isCustom(name)
+                            renderChip(
+                                name,
+                                name == selected,
+                                { onPick(name) },
+                                if (custom) ({ onLongPressCustom(name) }) else null,
+                            )
+                        }
+                        extraTrailingChip()
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Theme-import dialog. Accepts a `terminalcolors.com/themes/<name>/<variant>/` URL
+ * (or a direct .toml URL); calls the suspend importer in a coroutine; shows
+ * loading + error states.
+ */
+@Composable
+private fun ThemeImportDialog(
+    onDismiss: () -> Unit,
+    onImported: (String) -> Unit,
+    viewModel: TerminalViewModel,
+) {
+    var url by remember { mutableStateOf("") }
+    var busy by remember { mutableStateOf(false) }
+    var error by remember { mutableStateOf<String?>(null) }
+    val scope = rememberCoroutineScope()
+
+    AlertDialog(
+        onDismissRequest = { if (!busy) onDismiss() },
+        title = { Text("Import theme") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    "Paste a terminalcolors.com theme URL.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                OutlinedTextField(
+                    value = url,
+                    onValueChange = { url = it; error = null },
+                    placeholder = { Text("https://terminalcolors.com/themes/dracula/default/") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                if (error != null) {
+                    Text(error!!, color = MaterialTheme.colorScheme.error,
+                        style = MaterialTheme.typography.bodySmall)
+                }
+                if (busy) {
+                    CircularProgressIndicator(modifier = Modifier.size(20.dp))
+                }
             }
         },
         confirmButton = {
-            TextButton(onClick = onDismiss) {
-                Text("Done")
-            }
-        }
+            TextButton(
+                enabled = !busy && url.isNotBlank(),
+                onClick = {
+                    busy = true
+                    error = null
+                    scope.launch {
+                        val name = viewModel.importThemeFromUrl(url)
+                        busy = false
+                        if (name != null) onImported(name)
+                        else error = "Couldn't import — check the URL."
+                    }
+                },
+            ) { Text(if (busy) "Importing…" else "Import") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss, enabled = !busy) { Text("Cancel") }
+        },
+    )
+}
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun SwatchBox(
+    selected: Boolean,
+    onClick: () -> Unit,
+    backgroundColor: Color,
+    onLongClick: (() -> Unit)? = null,
+    content: @Composable BoxScope.() -> Unit,
+) {
+    val ring = if (selected) MaterialTheme.colorScheme.primary else Color.Transparent
+    val clickModifier = if (onLongClick != null) {
+        Modifier.combinedClickable(onClick = onClick, onLongClick = onLongClick)
+    } else {
+        Modifier.clickable(onClick = onClick)
+    }
+    Box(
+        modifier = Modifier
+            .size(width = 104.dp, height = 76.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .background(backgroundColor)
+            .then(clickModifier)
+            .border(
+                width = if (selected) 2.dp else 0.dp,
+                color = ring,
+                shape = RoundedCornerShape(12.dp),
+            )
+            .padding(6.dp),
+        contentAlignment = Alignment.Center,
+        content = content,
     )
 }
 
@@ -603,12 +1115,38 @@ private fun QuickSettingsRow(
     }
 }
 
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
 private fun QuickChip(
     label: String,
     selected: Boolean,
     onClick: () -> Unit,
+    onLongClick: (() -> Unit)? = null,
 ) {
+    // FilterChip doesn't expose onLongClick, so when a long-press handler is
+    // supplied we wrap it in a combinedClickable Box that mimics the chip's
+    // rounded shape + selected colors.
+    if (onLongClick != null) {
+        val bg = if (selected) MaterialTheme.colorScheme.primaryContainer
+                 else MaterialTheme.colorScheme.surfaceContainerHighest
+        val fg = if (selected) MaterialTheme.colorScheme.onPrimaryContainer
+                 else MaterialTheme.colorScheme.onSurface
+        Box(
+            modifier = Modifier
+                .clip(RoundedCornerShape(14.dp))
+                .background(bg)
+                .combinedClickable(onClick = onClick, onLongClick = onLongClick)
+                .padding(horizontal = 16.dp, vertical = 8.dp),
+        ) {
+            Text(
+                label,
+                style = MaterialTheme.typography.labelLarge,
+                color = fg,
+                fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
+            )
+        }
+        return
+    }
     FilterChip(
         selected = selected,
         onClick = onClick,
