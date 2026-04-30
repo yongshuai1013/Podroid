@@ -1,6 +1,6 @@
 /*
  * Podroid - Rootless Podman for Android
- * Copyright (C) 2024 Podroid contributors
+ * Copyright (C) 2024-2026 Podroid contributors
  *
  * App-wide settings backed by DataStore.
  */
@@ -44,16 +44,33 @@ class SettingsRepository @Inject constructor(
         val KEY_SHOW_EXTRA_KEYS        = booleanPreferencesKey("show_extra_keys")
         val KEY_HAPTICS_ENABLED        = booleanPreferencesKey("haptics_enabled")
 
-        /** Default tunable QEMU args — CPU model, accel tuning, RNG source, overcommit. */
+        /**
+         * Default tunable QEMU args — CPU model, accel tuning, RNG source, overcommit.
+         *
+         * `-cpu max,sve=off`: keeps LSE atomics, AES/SHA crypto, BTI, PAC, CRC32 —
+         * everything Node/Podman/etc. actually use — but drops SVE's variable-length
+         * vector instructions (and SVE2 with it), which are expensive to TCG-translate
+         * (every SVE op has many length-encoded variants) and rarely used outside HPC.
+         *
+         * `tb-size=512`: 512 MiB translation block cache (was 256 MiB). JIT-heavy
+         * guests like V8 recompile their own bytecode often, and TCG re-translates
+         * that machine code each time it falls out of cache. Larger cache = fewer
+         * re-translations. 512 MiB picked as a balance — enough for Node + npm hot
+         * paths without ballooning the QEMU process on phones with tight RAM.
+         */
         const val DEFAULT_QEMU_EXTRA_ARGS =
-            "-cpu max " +
-            "-accel tcg,thread=multi,tb-size=256 " +
+            "-cpu max,sve=off " +
+            "-accel tcg,thread=multi,tb-size=512 " +
             "-object rng-random,id=rng0,filename=/dev/urandom " +
             "-device virtio-rng-pci,rng=rng0 " +
             "-overcommit mem-lock=off"
 
-        /** Default extra kernel cmdline — log level, TCG-safe mitigations, I/O scheduler. */
-        const val DEFAULT_KERNEL_EXTRA_CMDLINE = "loglevel=1 quiet mitigations=off elevator=mq-deadline"
+        /**
+         * Default extra kernel cmdline — quiet boot + TCG-safe mitigations.
+         * `elevator=` is deprecated since Linux 5.0; podroid-bootstrap sets the I/O
+         * scheduler per-device via sysfs instead.
+         */
+        const val DEFAULT_KERNEL_EXTRA_CMDLINE = "loglevel=1 quiet mitigations=off"
     }
 
     private fun <T> pref(key: Preferences.Key<T>, default: T): Flow<T> =
