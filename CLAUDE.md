@@ -38,7 +38,9 @@ adb logcat -s PodroidQemu
 adb shell run-as com.excp.podroid.debug cat files/console.log
 ```
 
-The app uses debug build for all releases (release signing not configured). Native binaries require 16KB page alignment (`-Wl,-z,max-page-size=16384`) — mandatory on Android 13+.
+**All shipped builds are `debug` builds** — there's no Google Play / release signing certificate, so `assembleRelease` is never run. Consequence: `BuildConfig.VERSION_NAME` ends in `-debug` (e.g. `1.1.7-debug`), the `applicationId` is `com.excp.podroid.debug`, and any code that compares the local version string against an upstream release tag must strip the `-debug` suffix first (see `UpdateRepository.checkForUpdate`).
+
+Native binaries require 16KB page alignment (`-Wl,-z,max-page-size=16384`) — mandatory on Android 13+.
 
 ## Architecture
 
