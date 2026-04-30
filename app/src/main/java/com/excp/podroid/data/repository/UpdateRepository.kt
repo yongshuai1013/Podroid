@@ -52,7 +52,10 @@ class UpdateRepository @Inject constructor(
 
             context.dataStore.edit { it[lastCheckKey] = now }
 
-            if (isNewer(tag, currentVersion)) UpdateInfo(tag, url) else null
+            // Build-type suffix (`-debug`) is decoration, not a prerelease — strip it so
+            // 1.1.7-debug compares equal to the 1.1.7 release tag instead of "older".
+            val normalizedCurrent = currentVersion.removeSuffix("-debug")
+            if (isNewer(tag, normalizedCurrent)) UpdateInfo(tag, url) else null
         } catch (_: Exception) {
             null
         }
