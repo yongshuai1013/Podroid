@@ -1,7 +1,7 @@
 # Podroid AI Context
 
-> **Last updated:** 2026-04-29
-> **Current version:** 1.1.7 (versionCode 19)
+> **Last updated:** 2026-04-30
+> **Current version:** 1.1.8 (versionCode 20)
 > **Purpose:** Complete project context for AI-assisted development. Read this before touching any file.
 
 ---
@@ -614,7 +614,7 @@ adb shell run-as com.excp.podroid.debug cat files/console.log
 
 ---
 
-## Pending Work (as of 2026-04-29)
+## Pending Work (as of 2026-04-30)
 
 ### Next Feature: Container Hub
 Full container management screen — SSH into VM at `127.0.0.1:9922`, run `podman ps`, one-tap deploy from a catalog of services (Pi-hole, Vaultwarden, code-server, Gitea, Jellyfin, Uptime Kuma, Filebrowser, Nginx, Grafana). Requires JSch dependency.
@@ -624,7 +624,27 @@ Full container management screen — SSH into VM at `127.0.0.1:9922`, run `podma
 - **DNS configurable**: Currently hardcoded 8.8.8.8 + 1.1.1.1; add settings UI
 - **Overlay mount validation**: Detect and surface overlay failures with actionable error
 - **Terminal title → TopAppBar**: Wire `onTitleChanged()` to update app bar from OSC sequences
-- **Custom font loading**: Allow users to load their own .ttf files (GitHub issue #5)
+
+### Recently shipped (1.1.8)
+- **Vendored Termux fork (`MatanZ/sixel4`)**: `terminal-emulator` and `terminal-view` now live as local Gradle subprojects (not JitPack AARs), so we can patch the parser without a fork-and-publish dance. Replaces upstream Termux v0.118.1.
+- **Sixel + iTerm2 image protocols**: Inline images render in the in-app terminal via `chafa`, `lsix`, `kitty +kitten icat`, lazygit thumbnails, etc.
+- **Kitty graphics protocol** (minimum-viable: `a=T,f=100,t=d,m=0/1,c=,r=`): multi-chunk PNG inline rendering, used by yazi/lf/fzf preview.
+- **DECSET 2026 synchronized output**: Atomic-frame mode advertised + honored — btop / nvim / lazygit no longer flicker mid-redraw.
+- **OSC 8 hyperlinks**: tap-to-open URLs from `git`, `lazygit`, `gh` output. Region-list lookup avoids per-cell metadata.
+- **HarfBuzz ligatures**: `'liga' on, 'calt' on` Paint feature → JetBrains Mono / FiraCode / Cascadia render `===`, `=>`, `!=` etc. as fused glyphs.
+- **XTVERSION (`CSI > 0 q`) responder**: emulator answers `\eP>|Podroid <ver>\e\` so modern apps (Neovim ≥0.10) detect us correctly.
+- **Sixel parser fixes** (upstream sixel4 had two bugs we patched locally): the `Pa;Pb;Pcq` intro form (chafa's default) was rejected; the multi-part flush trigger missed `$` and `-`. Both fixed.
+- **Custom font import (Quick Settings → `+ Add` → SAF picker)**: drop in any `.ttf`, long-press to delete. Files live in app-private external dir; no permission prompts.
+- **Custom theme import** from `terminalcolors.com` URLs: paste a theme page URL; we fetch the Alacritty TOML export, parse, and convert to our `.properties` format.
+- **Top-sheet Quick Settings** (replaces sliding chip rows): drops down from header, font size slider, 4 visible chips per picker + `More` (search-aware full picker) + `+ Add` (font/theme import). Adapts portrait/landscape via height cap + scroll.
+- **PAC-free QEMU coroutine** (`libqemujmp` shim): replaces Bionic's `sigsetjmp`/`siglongjmp` in `coroutine-ucontext.c` with raw aarch64 asm that doesn't use PAC. Fixes the SIGILL crash on Pixel 10 Pro XL when Downloads sharing was enabled.
+- **PR_SET_PDEATHSIG launcher** (`libpodroid-launcher.so`): tiny wrapper that sets the parent-death signal before `execv`'ing QEMU, so the VM dies with the app instead of orphaning under PPID=1 across uninstalls/OOM/force-stop.
+- **64 KB PTY buffers + dedup'd MSG_NEW_INPUT + reused RectF**: terminal-layer perf — fewer wakeups, less GC pressure on image-heavy frames.
+- **`COLORTERM=truecolor` baked into rootfs** via `/etc/profile.d/podroid-color.sh` so apps detect 24-bit support.
+- **`-cpu max,sve=off` and `tb-size=512`**: SVE's variable-length vector instructions are expensive to TCG-translate and unused by Node/Podman/etc.; disabling speeds general workloads. Bigger TB cache helps JIT-heavy guests like V8.
+- **Kernel cmdline cleanups**: removed deprecated `elevator=mq-deadline` (now set per-device in `podroid-bootstrap` via sysfs); 9p `msize` lowered to virtio's actual cap (512000) to silence kernel warning.
+- **Update-dialog version compare fix**: `1.1.x-debug` no longer shows up as "older than 1.1.x" in the update prompt.
+- **Cursor-flicker on keyboard slide fix**: removed redundant `forceUpdateSizeFromView` call from layout listener (was racing with `tv.updateSize()` and triggering double resize).
 
 ### Recently shipped (1.1.7)
 - **Zero-config Docker**: `podroid-bootstrap` bind-mounts `/var/lib/docker` to raw ext4 on every boot, sidestepping Linux's overlay-on-overlay rejection. `apk add docker; rc-service docker start; docker run` works end to end with the kernel `overlay2` driver (not the slower FUSE fallback).

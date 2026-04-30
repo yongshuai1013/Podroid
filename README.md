@@ -290,8 +290,7 @@ ssh root@127.0.0.1 -p 9922                                                      
 - [x] Issue #17: `podman exec -it` works rootful and rootless ✅ *1.1.6*
 - [x] Custom Linux 6.6 kernel with all required options forced built-in ✅ *1.1.4*
 - [x] virtio-console terminal channel separate from boot serial ✅ *1.1.4*
-- [ ] User-loadable terminal fonts (drop a `.ttf` into a folder, picker auto-discovers)
-- [ ] Optional KVM acceleration on devices that expose it
+- [x] User-loadable terminal fonts (Quick Settings → font picker → `+ Add` chip → pick any `.ttf` via the system file chooser; long-press a custom font to remove) ✅ *next*
 
 Have an idea? [Open an issue](https://github.com/ExTV/Podroid/issues/new).
 
