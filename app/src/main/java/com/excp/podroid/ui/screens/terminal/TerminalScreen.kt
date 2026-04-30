@@ -293,7 +293,12 @@ fun TerminalScreen(
                             pending = scope.launch {
                                 kotlinx.coroutines.delay(150)
                                 val tv = v as TerminalView
-                                viewModel.forceUpdateSizeFromView(tv, typeface)
+                                // Just tv.updateSize() — it has the correct row math
+                                // (subtracts mFontLineSpacingAndAscent). Calling
+                                // forceUpdateSizeFromView too caused a row-count race:
+                                // the two computations disagree by 1 in some sizes,
+                                // triggering two back-to-back resizes per keyboard
+                                // slide and a visible cursor flicker.
                                 tv.updateSize()
                             }
                         }
@@ -304,11 +309,19 @@ fun TerminalScreen(
                         }
                     }
 
+                    // Last fontSize actually pushed to the View. Termux's TerminalView has no
+                    // getTextSize(), so we track it ourselves to skip redundant setTextSize +
+                    // updateSize calls on each recomposition (which were the visible flicker
+                    // source whenever extraCtrl/extraAlt flipped).
+                    var lastAppliedFontSize by remember { mutableStateOf(-1) }
                     AndroidView(
                         factory = { view },
                         update = { v ->
-                            v.setTextSize(fontSize)
-                            v.post { v.updateSize() }
+                            if (lastAppliedFontSize != fontSize) {
+                                lastAppliedFontSize = fontSize
+                                v.setTextSize(fontSize)
+                                v.post { v.updateSize() }
+                            }
                         },
                         modifier = Modifier.fillMaxSize(),
                     )
