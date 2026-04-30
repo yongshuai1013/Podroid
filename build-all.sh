@@ -1,7 +1,9 @@
 #!/bin/bash
 # ─────────────────────────────────────────────────────────────────────────────
 # Podroid Unified Build & Deploy Script
-# Combines QEMU, Termux JNI, and Initramfs builds into a single interface.
+# Coordinates kernel, initramfs, rootfs, QEMU, and APK builds.
+# (libtermux.so is no longer built here — the vendored terminal-emulator
+#  module compiles it via AGP's NDK build using src/main/jni/Android.mk.)
 # ─────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
@@ -29,19 +31,18 @@ Podroid Unified Build Tool
 Usage: $0 [command] [options]
 
 Commands:
-  all           Build everything (Kernel, Initramfs, Rootfs, QEMU, Termux JNI, APK)
+  all           Build everything (Kernel, Initramfs, Rootfs, QEMU, APK)
   kernel        Build custom kernel only (podroid_kernel.config + Linux source)
   initramfs     Build custom kernel + Alpine VM initramfs (vmlinuz + initrd)
   rootfs        Build Alpine rootfs squashfs (alpine-rootfs.squashfs)
-  qemu          Build QEMU + podroid-bridge
-  termux        Build libtermux.so (16KB page aligned)
-  apk           Build the Android APK
+  qemu          Build QEMU + podroid-bridge + podroid-launcher
+  apk           Build the Android APK (also builds libtermux.so via Gradle NDK)
   deploy        Build APK, uninstall old version, and install to device
   test          Perform full build, install, and automated boot validation
   clean         Remove build artifacts and temporary containers
 
 Options:
-  --fast        Skip QEMU/Termux native builds if binaries already exist
+  --fast        Skip QEMU native builds if binaries already exist
   --help        Show this help message
 
 EOF
@@ -153,28 +154,6 @@ build_qemu() {
     success "QEMU and bridge ready."
 }
 
-build_termux() {
-    log "Building libtermux.so (Local NDK)..."
-    local ndk
-    ndk=$(find_ndk) || error "NDK not found. Set ANDROID_NDK_ROOT or ANDROID_HOME."
-    
-    local build_dir="/tmp/termux-jni-build"
-    rm -rf "$build_dir"
-    git clone --depth=1 --branch v0.118.1 https://github.com/termux/termux-app.git "$build_dir"
-    
-    local cc="$ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android26-clang"
-    "$cc" --sysroot="$ndk/toolchains/llvm/prebuilt/linux-x86_64/sysroot" \
-        -O2 -fPIC -fvisibility=hidden -shared \
-        -o "$build_dir/libtermux.so" \
-        "$build_dir/terminal-emulator/src/main/jni/termux.c" \
-        -Wl,-soname,libtermux.so -Wl,-z,max-page-size=16384 -llog -landroid
-        
-    mkdir -p "$JNILIBS"
-    cp "$build_dir/libtermux.so" "$JNILIBS/"
-    verify_16kb_align "$JNILIBS/libtermux.so"
-    success "libtermux.so ready."
-}
-
 build_apk() {
     log "Building APK via Gradle..."
     ./gradlew assembleDebug
@@ -268,7 +247,6 @@ case "$1" in
     initramfs) build_initramfs ;;
     rootfs)    build_rootfs ;;
     qemu)      build_qemu ;;
-    termux)    build_termux ;;
     apk)       build_apk ;;
     deploy)    build_apk && deploy_apk ;;
     test)      run_boot_test ;;
@@ -276,7 +254,6 @@ case "$1" in
         build_initramfs
         build_rootfs
         build_qemu
-        build_termux
         build_apk
         ;;
     clean)
