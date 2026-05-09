@@ -37,7 +37,12 @@ apk -X "https://dl-cdn.alpinelinux.org/alpine/v${ALPINE_BRANCH}/main" \
     slirp4netns \
     aardvark-dns netavark \
     libcap-utils \
-    doas sudo
+    doas sudo \
+    gcompat \
+    gzip \
+    tigervnc \
+    pulseaudio \
+    pulseaudio-utils
 
 # Apply file capabilities to newuidmap/newgidmap. apk's package install often
 # does this, but we set them explicitly so the squashfs ships with the
@@ -130,7 +135,7 @@ EOF
 # Set runlevels via direct symlinks (host is x86_64, can't chroot into aarch64 rootfs to run rc-update).
 # rc-update is just `ln -s /etc/init.d/X /etc/runlevels/<level>/X` under the hood.
 mkdir -p "$ROOTFS/etc/runlevels/default" "$ROOTFS/etc/runlevels/boot"
-for svc in podroid-bootstrap podroid-network podroid-resize dropbear podroid-ready; do
+for svc in podroid-bootstrap podroid-network podroid-resize dropbear docker lxc dnsmasq.lxcbr0 podroid-x11 podroid-ready; do
     ln -sf "/etc/init.d/$svc" "$ROOTFS/etc/runlevels/default/$svc"
 done
 
