@@ -196,7 +196,7 @@ private fun AvfHintBanner(onDismiss: () -> Unit) {
                 style = MaterialTheme.typography.titleSmall,
             )
             Text(
-                "Run these once to unlock hardware acceleration:",
+                "Needs a PC with adb, or the Shizuku app for on-device grant. Run once:",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )

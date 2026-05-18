@@ -52,6 +52,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.excp.podroid.BuildConfig
@@ -202,6 +203,8 @@ fun SettingsScreen(
                 DownloadsSharingRow(
                     enabled = ui.storageAccessEnabled,
                     vmNotRunning = vmNotRunning,
+                    available = viewModel.isDownloadsShareAvailable(),
+                    activeBackendId = viewModel.activeBackendId(),
                     onToggle = { viewModel.setStorageAccessEnabled(it) },
                 )
                 Spacer(Modifier.height(PodroidTokens.Spacing.MD))
@@ -308,11 +311,28 @@ fun SettingsScreen(
             onDismissRequest = { avfReportText = null },
             title = { Text("AVF (pKVM) diagnostic") },
             text = {
-                Text(
-                    text = report,
-                    fontFamily = FontFamily.Monospace,
-                    style = MaterialTheme.typography.bodySmall,
-                )
+                androidx.compose.material3.Card(
+                    colors = androidx.compose.material3.CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.surfaceContainerHighest,
+                    ),
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    androidx.compose.foundation.layout.Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .verticalScroll(rememberScrollState())
+                            .padding(PodroidTokens.Spacing.SM),
+                    ) {
+                        Text(
+                            text = report,
+                            fontFamily = FontFamily.Monospace,
+                            style = MaterialTheme.typography.labelSmall.copy(
+                                fontSize = 10.sp,
+                                lineHeight = 14.sp,
+                            ),
+                        )
+                    }
+                }
             },
             confirmButton = {
                 TextButton(onClick = { avfReportText = null }) { Text("Close") }
@@ -467,11 +487,20 @@ private fun PortForwardSection(
 /**
  * Mirrors the setup wizard's storage-access toggle: turn it on and, if needed,
  * jump straight to the system MANAGE_EXTERNAL_STORAGE grant screen.
+ *
+ * Disabled when the active backend can't actually share Downloads — on AVF
+ * that's any pKVM device whose framework jar ships only the 9-param
+ * SharedPath ctor (no `appDomain` parameter). Google's TerminalApp escapes
+ * this because it's installed as a privileged system app under
+ * /apex/com.android.virt/priv-app/; third-party APKs can't get the SELinux
+ * promotion needed to cross-domain-share external storage.
  */
 @Composable
 private fun DownloadsSharingRow(
     enabled: Boolean,
     vmNotRunning: Boolean,
+    available: Boolean,
+    activeBackendId: String,
     onToggle: (Boolean) -> Unit,
 ) {
     val context = LocalContext.current
@@ -491,17 +520,31 @@ private fun DownloadsSharingRow(
         label = "Downloads sharing",
         rightSlot = {
             PodroidSwitch(
-                checked = enabled,
+                checked = enabled && available,
                 onCheckedChange = { checked ->
                     onToggle(checked)
                     if (checked && canManageAllFiles && !Environment.isExternalStorageManager()) {
                         openAllFilesAccessSettings()
                     }
                 },
-                enabled = vmNotRunning,
+                enabled = vmNotRunning && available,
             )
         },
     )
+    if (!available) {
+        Text(
+            text = "Not available on this $activeBackendId build — AVF requires a privileged " +
+                "system-app install (Google's Terminal app cheats this way); third-party " +
+                "APKs can't cross SELinux domains to read /storage/emulated/Download.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(
+                start = PodroidTokens.Spacing.MD,
+                end = PodroidTokens.Spacing.MD,
+                bottom = PodroidTokens.Spacing.SM,
+            ),
+        )
+    }
 }
 
 @Composable
