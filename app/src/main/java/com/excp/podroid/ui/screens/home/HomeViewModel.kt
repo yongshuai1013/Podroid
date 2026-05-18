@@ -97,7 +97,7 @@ class HomeViewModel @Inject constructor(
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 0L)
 
     /** Phone IPv4 — cheap, lazily recomputed when the screen reads it. */
-    fun phoneIp(): String = NetworkUtils.localIpv4()
+    fun phoneIp(): String = NetworkUtils.localIpv4(context)
 
     private val _updateInfo = MutableStateFlow<UpdateInfo?>(null)
     val updateInfo: StateFlow<UpdateInfo?> = _updateInfo.asStateFlow()

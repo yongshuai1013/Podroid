@@ -198,10 +198,24 @@ class SettingsViewModel @Inject constructor(
     }
 
     /** Current LAN IP of the Android device — shown next to port forward rules. Cached for the VM lifetime. */
-    val phoneIp: String by lazy { NetworkUtils.localIpv4() }
+    val phoneIp: String by lazy { NetworkUtils.localIpv4(context) }
 
     /** Returns the ID string of the currently active VM backend (e.g. "qemu" or "avf"). */
     fun activeBackendId(): String = engine.backendId
+
+    /**
+     * True if Downloads sharing actually works on the currently-active backend.
+     * QEMU's virtio-9p path always works (it runs as part of our process and
+     * doesn't cross SELinux domains). AVF requires the 10-param `SharedPath`
+     * ctor with `appDomain=false` so crosvm can spin up in virtmgr's system
+     * domain and read /storage/emulated/... — without it the VM crashes at
+     * start. Shipping Pixel mustang beta has the 9-param ctor only, so AVF
+     * Downloads sharing is effectively unavailable to third-party apps there.
+     */
+    fun isDownloadsShareAvailable(): Boolean = when (engine.backendId) {
+        "avf" -> com.excp.podroid.engine.avf.AvfDiagnostics.externalStorageShareSupported()
+        else  -> true
+    }
 
     fun removePortForward(rule: PortForwardRule) {
         viewModelScope.launch { portForwardRepository.removeRule(rule) }
