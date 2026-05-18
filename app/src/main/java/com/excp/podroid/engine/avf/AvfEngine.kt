@@ -104,6 +104,9 @@ class AvfEngine @Inject constructor(
     @Volatile private var control: VsockControlChannel? = null
     /** vport → forwarder. The diff loop in EngineHolder is the single writer. */
     private val forwarders = java.util.concurrent.ConcurrentHashMap<Int, VsockPortForwarder>()
+    @Volatile private var lastSentRows = -1
+    @Volatile private var lastSentCols = -1
+    private var resizeDebounceJob: kotlinx.coroutines.Job? = null
 
     val terminalSockPath: String get() = "${context.filesDir.absolutePath}/avf-terminal.sock"
     val ctrlSockPath: String get() = "${context.filesDir.absolutePath}/avf-ctrl.sock"
@@ -248,17 +251,18 @@ class AvfEngine @Inject constructor(
                 Log.e(TAG, "bridge missing at ${bridgeExe.absolutePath}")
                 return@post
             }
-            val sess = TerminalSession(
-                bridgeExe.absolutePath,
-                context.filesDir.absolutePath,
-                arrayOf(bridgeExe.absolutePath, terminalSockPath, ctrlSockPath),
-                null,
-                2000,
-                proxySessionClient,
+            val sess = com.excp.podroid.engine.ResizeNotifyingSession(
+                shellPath = bridgeExe.absolutePath,
+                cwd = context.filesDir.absolutePath,
+                args = arrayOf(bridgeExe.absolutePath, terminalSockPath, ctrlSockPath),
+                env = null,
+                transcriptRows = 2000,
+                client = proxySessionClient,
+                onResize = { rows, cols -> sendResizeDebounced(rows, cols) },
             )
             sess.updateSize(80, 24, 0, 0)
             terminalSession = sess
-            Log.d(TAG, "AVF bridge auto-spawned")
+            Log.d(TAG, "AVF bridge auto-spawned (resize-notifying)")
         }
     }
 
@@ -321,6 +325,25 @@ class AvfEngine @Inject constructor(
         Log.i(TAG, "live forward down: 0.0.0.0:${rule.hostPort}")
     }
 
+    /**
+     * Coalesce SIGWINCH bursts (keyboard slide produces ~25 layout events) into
+     * one RESIZE message. 80 ms matches the bridge's RESIZE_DEBOUNCE_MS constant
+     * so the AVF behavior tracks the QEMU bridge's user-visible cadence.
+     */
+    private fun sendResizeDebounced(rows: Int, cols: Int) {
+        if (rows == lastSentRows && cols == lastSentCols) return
+        resizeDebounceJob?.cancel()
+        resizeDebounceJob = scope.launch {
+            kotlinx.coroutines.delay(80)
+            val ctl = control ?: return@launch
+            // sendResize queues if the connect retry hasn't completed yet —
+            // no need to gate on isOpen.
+            ctl.sendResize(rows, cols)
+            lastSentRows = rows
+            lastSentCols = cols
+        }
+    }
+
     override fun createTerminalSession(client: TerminalSessionClient): TerminalSession {
         sessionClientDelegate = client
         terminalSession?.let {
@@ -328,19 +351,19 @@ class AvfEngine @Inject constructor(
             return it
         }
         // start() hasn't reached spawnBridge yet — spawn synchronously as fallback.
-        // (Should be rare: caller opens Terminal before VM start completes.)
         Log.w(TAG, "createTerminalSession called before bridge auto-spawn; spawning now")
         val bridgeExe = File(context.applicationInfo.nativeLibraryDir, "libpodroid-bridge.so")
         if (!bridgeExe.exists()) {
             throw IllegalStateException("podroid-bridge not found at ${bridgeExe.absolutePath}")
         }
-        val sess = TerminalSession(
-            bridgeExe.absolutePath,
-            context.filesDir.absolutePath,
-            arrayOf(bridgeExe.absolutePath, terminalSockPath, ctrlSockPath),
-            null,
-            2000,
-            proxySessionClient,
+        val sess = com.excp.podroid.engine.ResizeNotifyingSession(
+            shellPath = bridgeExe.absolutePath,
+            cwd = context.filesDir.absolutePath,
+            args = arrayOf(bridgeExe.absolutePath, terminalSockPath, ctrlSockPath),
+            env = null,
+            transcriptRows = 2000,
+            client = proxySessionClient,
+            onResize = { rows, cols -> sendResizeDebounced(rows, cols) },
         )
         sess.updateSize(80, 24, 0, 0)
         terminalSession = sess
@@ -352,6 +375,10 @@ class AvfEngine @Inject constructor(
         // VM doesn't see late vsock connect attempts after onStopped.
         forwarders.values.forEach { runCatching { it.close() } }
         forwarders.clear()
+        lastSentRows = -1
+        lastSentCols = -1
+        resizeDebounceJob?.cancel()
+        resizeDebounceJob = null
         runCatching { control?.close() }
         control = null
         // Close fanout next — drains its coroutines and closes the streams inside.
