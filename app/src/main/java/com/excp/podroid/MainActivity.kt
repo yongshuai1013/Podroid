@@ -45,6 +45,8 @@ class MainActivity : ComponentActivity() {
             // app stays foreground (the VM is never backgrounded -> never killed).
             androidx.compose.runtime.LaunchedEffect(headlessActive) {
                 val lp = window.attributes
+                val bars = androidx.core.view.WindowInsetsControllerCompat(window, window.decorView)
+                val systemBars = androidx.core.view.WindowInsetsCompat.Type.systemBars()
                 if (headlessActive) {
                     lp.screenBrightness = 0.004f
                     window.attributes = lp
@@ -57,10 +59,17 @@ class MainActivity : ComponentActivity() {
                     (getSystemService(android.content.Context.INPUT_METHOD_SERVICE)
                         as? android.view.inputmethod.InputMethodManager)
                         ?.hideSoftInputFromWindow(window.decorView.windowToken, 0)
+                    // Go fully immersive: hide the status + navigation bars so no
+                    // pixels stay lit (OLED burn-in risk on an always-on server
+                    // screen). A swipe reveals them transiently. Matches X11.
+                    bars.hide(systemBars)
+                    bars.systemBarsBehavior =
+                        androidx.core.view.WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
                 } else {
                     lp.screenBrightness = android.view.WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE
                     window.attributes = lp
                     window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                    bars.show(systemBars)
                 }
             }
 
