@@ -191,6 +191,7 @@ podroid-notify --id 7 "progress 50%"</code></pre>
       <div class="callout note">
         <span class="label">UDP on AVF</span>
         <p>UDP forwarding works on both backends. Because vsock is a stream transport, each inbound UDP datagram is length-framed and carried over a per-client vsock connection, then delivered to the guest as a real UDP datagram - so a guest DNS server such as Pi-hole is reachable over UDP. Idle flows are reaped automatically, and the number of concurrent client flows is capped to bound resource use.</p>
+        <p>The privileged-port limit applies at both ends: an unprivileged Android app can't bind a host port below 1024, and rootless Podman can't publish a privileged port inside the guest either. So run a DNS server like Pi-hole on a high port - for example host <code>5353/udp</code> to guest <code>5353/udp</code> - and point clients at <code>&lt;phone-ip&gt;:5353</code>.</p>
       </div>
 
       <div class="pagenav">
